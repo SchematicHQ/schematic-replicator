@@ -88,7 +88,6 @@ func (h *ReplicatorMessageHandler) handleErrorMessage(ctx context.Context, messa
 
 // Flags handling
 func (h *ReplicatorMessageHandler) handleFlagsMessage(ctx context.Context, message *schematicdatastreamws.DataStreamResp) error {
-	h.logger.Debug(ctx, fmt.Sprintf("Received flags message: %v", message))
 	switch message.MessageType {
 	case schematicdatastreamws.MessageTypeFull, schematicdatastreamws.MessageTypePartial:
 		// For flags, we expect an array of rulesengine.Flag
@@ -413,78 +412,126 @@ func (h *ConnectionReadyHandler) OnConnectionReady(ctx context.Context) error {
 func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) error {
 	h.logger.Info(ctx, "Loading companies from Schematic API")
 
-	// Fetch all companies
-	companiesResp, err := h.schematicClient.Companies.ListCompanies(ctx, &schematicgo.ListCompaniesRequest{})
-	if err != nil {
-		h.logger.Error(ctx, fmt.Sprintf("Failed to fetch companies: %v", err))
-		return err
-	}
+	pageSize := 100
+	offset := 0
+	totalCompanies := 0
 
-	// Convert and cache all companies
-	for _, companyData := range companiesResp.Data {
-		company := convertToRulesEngineCompany(companyData)
+	for {
+		h.logger.Debug(ctx, fmt.Sprintf("Fetching companies page: offset=%d, limit=%d", offset, pageSize))
 
-		h.logger.Debug(ctx, fmt.Sprintf("Company %s has %d keys: %v", company.ID, len(company.Keys), company.Keys))
+		// Fetch companies page
+		companiesResp, err := h.schematicClient.Companies.ListCompanies(ctx, &schematicgo.ListCompaniesRequest{
+			Limit:  &pageSize,
+			Offset: &offset,
+		})
+		if err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to fetch companies (offset=%d): %v", offset, err))
+			return err
+		}
 
-		// Cache the company with all its key-value pairs (matching schematic-go behavior)
-		cacheResults := h.cacheCompanyForKeys(ctx, company)
-		for cacheKey, cacheErr := range cacheResults {
-			if cacheErr != nil {
-				h.logger.Error(ctx, fmt.Sprintf("Cache error for company %s key '%s': %v", company.ID, cacheKey, cacheErr))
-			} else {
-				h.logger.Debug(ctx, fmt.Sprintf("Successfully cached company key '%s'", cacheKey))
-				// Additional debug: verify the key exists immediately
-				if _, err := h.companiesCache.Get(ctx, cacheKey); err != nil {
-					h.logger.Error(ctx, fmt.Sprintf("Key '%s' not found immediately after caching: %v", cacheKey, err))
+		h.logger.Debug(ctx, fmt.Sprintf("Retrieved %d companies from page (offset=%d)", len(companiesResp.Data), offset))
+
+		// Convert and cache all companies from this page
+		for _, companyData := range companiesResp.Data {
+			company := convertToRulesEngineCompany(companyData)
+
+			h.logger.Debug(ctx, fmt.Sprintf("Company %s has %d keys: %v", company.ID, len(company.Keys), company.Keys))
+
+			// Cache the company with all its key-value pairs (matching schematic-go behavior)
+			cacheResults := h.cacheCompanyForKeys(ctx, company)
+			for cacheKey, cacheErr := range cacheResults {
+				if cacheErr != nil {
+					h.logger.Error(ctx, fmt.Sprintf("Cache error for company %s key '%s': %v", company.ID, cacheKey, cacheErr))
+				} else {
+					h.logger.Debug(ctx, fmt.Sprintf("Successfully cached company key '%s'", cacheKey))
+					// Additional debug: verify the key exists immediately
+					if _, err := h.companiesCache.Get(ctx, cacheKey); err != nil {
+						h.logger.Error(ctx, fmt.Sprintf("Key '%s' not found immediately after caching: %v", cacheKey, err))
+					}
 				}
+			}
+
+			if len(cacheResults) > 0 {
+				h.logger.Debug(ctx, fmt.Sprintf("Cached company with %d keys: %s", len(cacheResults), company.ID))
+			} else {
+				h.logger.Warn(ctx, fmt.Sprintf("Company %s has no keys to cache", company.ID))
 			}
 		}
 
-		if len(cacheResults) > 0 {
-			h.logger.Debug(ctx, fmt.Sprintf("Cached company with %d keys: %s", len(cacheResults), company.ID))
-		} else {
-			h.logger.Warn(ctx, fmt.Sprintf("Company %s has no keys to cache", company.ID))
+		totalCompanies += len(companiesResp.Data)
+
+		// Check if we got fewer results than the page size, indicating we've reached the end
+		if len(companiesResp.Data) < pageSize {
+			h.logger.Debug(ctx, fmt.Sprintf("Reached end of companies list (got %d < %d)", len(companiesResp.Data), pageSize))
+			break
 		}
+
+		// Move to next page
+		offset += pageSize
 	}
 
-	h.logger.Info(ctx, fmt.Sprintf("Successfully cached %d companies", len(companiesResp.Data)))
+	h.logger.Info(ctx, fmt.Sprintf("Successfully cached %d companies across all pages", totalCompanies))
 	return nil
 }
 
 func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 	h.logger.Info(ctx, "Loading users from Schematic API")
 
-	// Fetch all users
-	usersResp, err := h.schematicClient.Companies.ListUsers(ctx, &schematicgo.ListUsersRequest{})
-	if err != nil {
-		h.logger.Error(ctx, fmt.Sprintf("Failed to fetch users: %v", err))
-		return err
-	}
+	pageSize := 100
+	offset := 0
+	totalUsers := 0
 
-	// Convert and cache all users
-	for _, userData := range usersResp.Data {
-		user := convertToRulesEngineUser(userData)
+	for {
+		h.logger.Debug(ctx, fmt.Sprintf("Fetching users page: offset=%d, limit=%d", offset, pageSize))
 
-		h.logger.Debug(ctx, fmt.Sprintf("User %s has %d keys: %v", user.ID, len(user.Keys), user.Keys))
+		// Fetch users page
+		usersResp, err := h.schematicClient.Companies.ListUsers(ctx, &schematicgo.ListUsersRequest{
+			Limit:  &pageSize,
+			Offset: &offset,
+		})
+		if err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to fetch users (offset=%d): %v", offset, err))
+			return err
+		}
 
-		// Cache the user with all its key-value pairs (matching schematic-go behavior)
-		cacheResults := h.cacheUserForKeys(ctx, user)
-		for cacheKey, cacheErr := range cacheResults {
-			if cacheErr != nil {
-				h.logger.Error(ctx, fmt.Sprintf("Cache error for user %s key '%s': %v", user.ID, cacheKey, cacheErr))
+		h.logger.Debug(ctx, fmt.Sprintf("Retrieved %d users from page (offset=%d)", len(usersResp.Data), offset))
+
+		// Convert and cache all users from this page
+		for _, userData := range usersResp.Data {
+			user := convertToRulesEngineUser(userData)
+
+			h.logger.Debug(ctx, fmt.Sprintf("User %s has %d keys: %v", user.ID, len(user.Keys), user.Keys))
+
+			// Cache the user with all its key-value pairs (matching schematic-go behavior)
+			cacheResults := h.cacheUserForKeys(ctx, user)
+			for cacheKey, cacheErr := range cacheResults {
+				if cacheErr != nil {
+					h.logger.Error(ctx, fmt.Sprintf("Cache error for user %s key '%s': %v", user.ID, cacheKey, cacheErr))
+				} else {
+					h.logger.Debug(ctx, fmt.Sprintf("Successfully cached user key '%s'", cacheKey))
+				}
+			}
+
+			if len(cacheResults) > 0 {
+				h.logger.Debug(ctx, fmt.Sprintf("Cached user with %d keys: %s", len(cacheResults), user.ID))
 			} else {
-				h.logger.Debug(ctx, fmt.Sprintf("Successfully cached user key '%s'", cacheKey))
+				h.logger.Warn(ctx, fmt.Sprintf("User %s has no keys to cache", user.ID))
 			}
 		}
 
-		if len(cacheResults) > 0 {
-			h.logger.Debug(ctx, fmt.Sprintf("Cached user with %d keys: %s", len(cacheResults), user.ID))
-		} else {
-			h.logger.Warn(ctx, fmt.Sprintf("User %s has no keys to cache", user.ID))
+		totalUsers += len(usersResp.Data)
+
+		// Check if we got fewer results than the page size, indicating we've reached the end
+		if len(usersResp.Data) < pageSize {
+			h.logger.Debug(ctx, fmt.Sprintf("Reached end of users list (got %d < %d)", len(usersResp.Data), pageSize))
+			break
 		}
+
+		// Move to next page
+		offset += pageSize
 	}
 
-	h.logger.Info(ctx, fmt.Sprintf("Successfully cached %d users", len(usersResp.Data)))
+	h.logger.Info(ctx, fmt.Sprintf("Successfully cached %d users across all pages", totalUsers))
 	return nil
 }
 

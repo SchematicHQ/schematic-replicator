@@ -117,13 +117,14 @@ The application implements a sophisticated caching system inspired by schematic-
 - **Cache Providers**: Generic interface supporting both Redis and local cache
 - **Automatic Fallback**: Falls back to local cache if Redis is unavailable
 - **TTL Management**: Configurable time-to-live for cached entries
+- **Paginated Data Loading**: Efficiently loads all companies and users through paginated API requests (100 items per page)
 - **Stale Data Cleanup**: Removes outdated cache entries during bulk updates and periodic version cleanup
 - **Version-Based Cleanup**: Automatically removes cache entries with old version keys to prevent memory leaks with unlimited cache
 - **Key Management**: Uses hierarchical cache keys for efficient data organization
 
 ### Data Flow
 1. **Connection Establishment**: WebSocket connects to Schematic datastream
-2. **Initial Data Load**: Requests all flags, companies, and users on connection ready
+2. **Initial Data Load**: Requests all flags, companies, and users on connection ready using paginated API calls (100 items per page)
 3. **Real-time Updates**: Receives and processes individual entity updates
 4. **Cache Synchronization**: Updates cache with new data and removes stale entries
 5. **Error Handling**: Logs errors and maintains connection resilience
@@ -194,10 +195,20 @@ Example output:
 [INFO] Datastream connection ready, requesting all flags, companies and users...
 [INFO] Received 15 flags
 [INFO] Loaded 15 flags into cache
-[INFO] Received 234 companies
-[INFO] Loaded 234 companies into cache
-[INFO] Received 1456 users
-[INFO] Loaded 1456 users into cache
+[INFO] Loading companies from Schematic API
+[DEBUG] Fetching companies page: offset=0, limit=100
+[DEBUG] Retrieved 100 companies from page (offset=0)
+[DEBUG] Fetching companies page: offset=100, limit=100
+[DEBUG] Retrieved 100 companies from page (offset=100)
+[DEBUG] Fetching companies page: offset=200, limit=100
+[DEBUG] Retrieved 34 companies from page (offset=200)
+[DEBUG] Reached end of companies list (got 34 < 100)
+[INFO] Successfully cached 234 companies across all pages
+[INFO] Loading users from Schematic API  
+[DEBUG] Fetching users page: offset=0, limit=100
+[DEBUG] Retrieved 100 users from page (offset=0)
+[...additional pages...]
+[INFO] Successfully cached 1456 users across all pages
 ```
 
 ## Error Handling
