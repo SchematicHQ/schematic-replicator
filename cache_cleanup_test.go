@@ -7,15 +7,19 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/schematichq/rulesengine"
+	"github.com/schematichq/schematic-go/core"
 )
 
 // Mock logger for testing
 type mockLogger struct{}
 
-func (m *mockLogger) Info(ctx context.Context, message string)  {}
-func (m *mockLogger) Warn(ctx context.Context, message string)  {}
-func (m *mockLogger) Error(ctx context.Context, message string) {}
-func (m *mockLogger) Debug(ctx context.Context, message string) {}
+func (m *mockLogger) Info(ctx context.Context, message string, args ...any)  {}
+func (m *mockLogger) Warn(ctx context.Context, message string, args ...any)  {}
+func (m *mockLogger) Error(ctx context.Context, message string, args ...any) {}
+func (m *mockLogger) Debug(ctx context.Context, message string, args ...any) {}
+
+// Compile-time check to ensure mockLogger implements core.Logger
+var _ core.Logger = (*mockLogger)(nil)
 
 func TestCacheCleanupManager(t *testing.T) {
 	// Create mock caches (we'll use Redis with a test client)

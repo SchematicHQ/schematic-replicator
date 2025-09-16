@@ -1,8 +1,8 @@
 package main
 
 import (
-"context"
-"log"
+	"context"
+	"log"
 )
 
 // Custom logger implementing the schematic-go Logger interface
@@ -13,10 +13,10 @@ type SchematicLogger struct {
 type LogLevel int
 
 const (
-LogLevelDebug LogLevel = iota
-LogLevelInfo
-LogLevelWarn
-LogLevelError
+	LogLevelDebug LogLevel = iota
+	LogLevelInfo
+	LogLevelWarn
+	LogLevelError
 )
 
 func NewSchematicLogger() *SchematicLogger {
@@ -25,27 +25,43 @@ func NewSchematicLogger() *SchematicLogger {
 	}
 }
 
-func (l *SchematicLogger) Debug(ctx context.Context, msg string) {
+func (l *SchematicLogger) Debug(ctx context.Context, msg string, args ...any) {
 	if l.level <= LogLevelDebug {
-		log.Printf("[DEBUG] %s", msg)
+		if len(args) > 0 {
+			log.Printf("[DEBUG] "+msg, args...)
+		} else {
+			log.Printf("[DEBUG] %s", msg)
+		}
 	}
 }
 
-func (l *SchematicLogger) Info(ctx context.Context, msg string) {
+func (l *SchematicLogger) Info(ctx context.Context, msg string, args ...any) {
 	if l.level <= LogLevelInfo {
-		log.Printf("[INFO] %s", msg)
+		if len(args) > 0 {
+			log.Printf("[INFO] "+msg, args...)
+		} else {
+			log.Printf("[INFO] %s", msg)
+		}
 	}
 }
 
-func (l *SchematicLogger) Warn(ctx context.Context, msg string) {
+func (l *SchematicLogger) Warn(ctx context.Context, msg string, args ...any) {
 	if l.level <= LogLevelWarn {
-		log.Printf("[WARN] %s", msg)
+		if len(args) > 0 {
+			log.Printf("[WARN] "+msg, args...)
+		} else {
+			log.Printf("[WARN] %s", msg)
+		}
 	}
 }
 
-func (l *SchematicLogger) Error(ctx context.Context, msg string) {
+func (l *SchematicLogger) Error(ctx context.Context, msg string, args ...any) {
 	if l.level <= LogLevelError {
-		log.Printf("[ERROR] %s", msg)
+		if len(args) > 0 {
+			log.Printf("[ERROR] "+msg, args...)
+		} else {
+			log.Printf("[ERROR] %s", msg)
+		}
 	}
 }
 

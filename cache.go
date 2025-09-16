@@ -10,6 +10,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/redis/go-redis/v9"
 	"github.com/schematichq/rulesengine"
+	"github.com/schematichq/schematic-go/core"
 )
 
 // Cache key builders (matching schematic-go datastream client functionality)
@@ -183,17 +184,9 @@ type CacheCleanupManager struct {
 	flagsCache     CacheProvider[*rulesengine.Flag]
 	companiesCache CacheProvider[*rulesengine.Company]
 	usersCache     CacheProvider[*rulesengine.User]
-	logger         Logger
+	logger         core.Logger
 	cleanupTicker  *time.Ticker
 	stopChan       chan struct{}
-}
-
-// Logger interface for cleanup operations
-type Logger interface {
-	Info(ctx context.Context, message string)
-	Warn(ctx context.Context, message string)
-	Error(ctx context.Context, message string)
-	Debug(ctx context.Context, message string)
 }
 
 // NewCacheCleanupManager creates a new cache cleanup manager
@@ -201,7 +194,7 @@ func NewCacheCleanupManager(
 	flagsCache CacheProvider[*rulesengine.Flag],
 	companiesCache CacheProvider[*rulesengine.Company],
 	usersCache CacheProvider[*rulesengine.User],
-	logger Logger,
+	logger core.Logger,
 	cleanupInterval time.Duration,
 ) *CacheCleanupManager {
 	return &CacheCleanupManager{
