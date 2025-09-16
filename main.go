@@ -302,8 +302,8 @@ func main() {
 	wsOptions := schematicdatastreamws.ClientOptions{
 		URL:                    datastreamURL,
 		Headers:                headers,
-		MessageHandler:         messageHandler,
-		ConnectionReadyHandler: connectionReadyHandler,
+		MessageHandler:         messageHandler.HandleMessage,
+		ConnectionReadyHandler: connectionReadyHandler.OnConnectionReady,
 		Logger:                 logger,
 		MaxReconnectAttempts:   10,
 		MinReconnectDelay:      1 * time.Second,
