@@ -1,0 +1,45 @@
+# docker-compose.override.yml.example
+# Copy this file to docker-compose.override.yml and customize for local development
+# This file provides configurations for connecting to local services running outside Docker
+
+version: '3.8'
+
+services:
+  schematic-replicator:
+    # Enable access to host services via host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    environment:
+      # Connect to local API service running on host
+      - SCHEMATIC_API_URL=http://host.docker.internal:8080
+      
+      # Optional: Override other settings for development
+      - LOG_LEVEL=debug
+      - CACHE_TTL=1m
+      
+      # If your local API uses a different port, change accordingly:
+      # - SCHEMATIC_API_URL=http://host.docker.internal:3000
+      # - SCHEMATIC_API_URL=http://host.docker.internal:5000
+    
+    # Optional: For debugging, expose additional ports
+    ports:
+      - "8090:8090"  # Health check port
+      - "6379:6379"  # Optional: direct Redis access for debugging
+    
+    # Optional: Mount volumes for development
+    # volumes:
+    #   - ./logs:/app/logs  # If you want to persist logs
+
+# Alternative configuration for network_mode: host (Linux only)
+# Uncomment the section below and comment out the above if on Linux
+# and want to use host networking
+#
+# services:
+#   schematic-replicator:
+#     network_mode: "host"
+#     environment:
+#       - SCHEMATIC_API_URL=http://localhost:8080
+#       - REDIS_ADDR=localhost:6380  # Use the mapped Redis port
+#       - LOG_LEVEL=debug
+#     # Note: ports mapping not needed with host networking

@@ -1,0 +1,56 @@
+# Multi-stage Dockerfile for schematic-datastream-replicator
+# This version assumes all dependencies are published or available as published modules
+
+# Build stage
+FROM golang:1.25-alpine AS builder
+
+# Install security tools and certificates
+RUN apk add --no-cache ca-certificates git
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Create a temporary go.mod without replace directives for dependency resolution
+RUN sed '/^replace /d' go.mod > go.mod.temp && mv go.mod.temp go.mod
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the application with security flags
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags='-w -s -extldflags "-static"' \
+    -a -installsuffix cgo \
+    -o schematic-datastream-replicator .
+
+# Final stage using Google's distroless image for minimal attack surface
+FROM gcr.io/distroless/static-debian12:nonroot
+
+# Health port configuration (can be overridden at build time)
+ARG HEALTH_PORT=8090
+ENV HEALTH_PORT=${HEALTH_PORT}
+
+# Copy CA certificates
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# Copy the binary
+COPY --from=builder /app/schematic-datastream-replicator /schematic-datastream-replicator
+
+# Use non-root user (distroless provides this automatically)
+USER nonroot:nonroot
+
+# Expose the application port (configurable)
+EXPOSE ${HEALTH_PORT}
+
+# No built-in health check - let orchestrators handle health checks via HTTP endpoints
+# Health endpoints available at:
+# - GET /health (liveness probe)
+# - GET /ready (readiness probe)
+
+# Run the application
+ENTRYPOINT ["/schematic-datastream-replicator"]
