@@ -21,7 +21,8 @@ import (
 )
 
 const (
-	defaultBaseURL              = "ws://localhost:8080/datastream"
+	defaultAPIURL               = "https://api.schematichq.com"
+	defaultLocalAPIURL          = "http://localhost:8080"
 	apiKeyEnvVar                = "SCHEMATIC_API_KEY"
 	defaultCacheTTL             = 0 * time.Second // Unlimited cache by default
 	defaultCacheCleanupInterval = 1 * time.Hour   // Clean up stale cache entries every hour
@@ -178,22 +179,25 @@ func (hs *HealthServer) readinessHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func main() {
+
 	// Get API key from environment
 	apiKey := os.Getenv(apiKeyEnvVar)
 	if apiKey == "" {
 		log.Fatalf("Please set %s environment variable", apiKeyEnvVar)
 	}
 
-	// Get datastream WebSocket URL from environment or use default
-	datastreamURL := os.Getenv("SCHEMATIC_DATASTREAM_URL")
-	if datastreamURL == "" {
-		datastreamURL = defaultBaseURL
-	}
-
 	// Get API base URL from environment or use default
 	apiBaseURL := os.Getenv("SCHEMATIC_API_URL")
 	if apiBaseURL == "" {
-		apiBaseURL = "https://api.schematichq.com"
+		apiBaseURL = defaultAPIURL
+	}
+
+	// Get datastream WebSocket URL from environment
+	// If not set, the schematic-go datastream client will automatically
+	// convert the API URL to a WebSocket URL (http->ws, https->wss, +/datastream path)
+	datastreamURL := os.Getenv("SCHEMATIC_DATASTREAM_URL")
+	if datastreamURL == "" {
+		datastreamURL = apiBaseURL // Let the datastream client handle URL conversion
 	}
 
 	// Get cache TTL from environment
@@ -243,7 +247,11 @@ func main() {
 
 	logger.Info(context.Background(), "Starting Schematic Datastream Replicator...")
 	logger.Info(context.Background(), fmt.Sprintf("API URL: %s", apiBaseURL))
-	logger.Info(context.Background(), fmt.Sprintf("Datastream URL: %s", datastreamURL))
+	if os.Getenv("SCHEMATIC_DATASTREAM_URL") != "" {
+		logger.Info(context.Background(), fmt.Sprintf("Datastream URL: %s (explicit)", datastreamURL))
+	} else {
+		logger.Info(context.Background(), fmt.Sprintf("Datastream URL: %s (derived from API URL)", datastreamURL))
+	}
 	logger.Info(context.Background(), fmt.Sprintf("Health server port: %d", healthPort))
 
 	// Create cache providers - only Redis, no local cache fallback
