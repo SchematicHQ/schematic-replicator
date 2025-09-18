@@ -101,8 +101,6 @@ logs/
 # Local development files
 local.*
 **/local.*
-**/deployments/
-**/scripts/
 
 # Cache directories
 .cache/
@@ -127,23 +125,3 @@ debug
 **/debug
 __debug_bin*
 **/__debug_bin*
-
-# Exclude other schematic projects from this specific image
-schematic-go/
-schematic-js/
-schematic-node/
-schematic-python/
-schematic-csharp/
-schematic-next-example/
-schematic-quickstart/
-schematic-typescript-*/
-schematic-cloudflare-node/
-schematic-fern-config/
-api/
-app/
-billy-python/
-dev/
-rcc/
-rulesengine/
-scripts/
-testing/
