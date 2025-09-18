@@ -1,8 +1,43 @@
 # Schematic Datastream Replicator
 
-A Go application that demonstrates the usage of the `schematic-datastream-ws` package for real-time data synchronization with Schematic's datastream service. This enhanced version includes comprehensive caching, logging, and flag support.
+A high-performance, production-ready service that replicates Schematic data to Redis cache for ultra-fast lookups, serving as a caching proxy between applications and the Schematic API.
 
-## Features
+## 📁 Repository Structure
+
+```
+├── docs/                    # Documentation
+│   ├── DEV-README.md       # Development guide
+│   └── DOCKER.md           # Docker usage guide
+├── scripts/                # Build and utility scripts
+│   ├── build-docker.sh     # Docker image build script
+│   ├── dev-build.sh        # Development build script
+│   ├── setup-local-dev.sh  # Local development setup
+│   ├── check-docker-compose.sh # Docker Compose compatibility check
+│   └── health-check.sh     # Health check script
+├── deployments/            # Deployment configurations
+│   ├── Dockerfile          # Main Docker image
+│   ├── Dockerfile.standalone # Standalone Docker image
+│   ├── docker-compose.yml  # Docker Compose configuration
+│   ├── docker-compose.override.yml.example # Local override example
+│   └── .dockerignore       # Docker build ignore rules
+├── main.go                 # Application entry point
+├── handlers.go             # Message and connection handlers
+├── cache.go               # Cache implementation
+├── logger.go              # Logging utilities
+├── redis.go               # Redis client configuration
+├── *_test.go              # Test files
+├── go.mod                 # Go module definition
+├── go.sum                 # Go module checksums
+├── Makefile               # Build and development tasks
+└── README.md              # This file
+```
+
+## 🚀 Quick Start
+
+For detailed development setup, see [docs/DEV-README.md](docs/DEV-README.md).
+For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
+
+## ✨ Features
 
 - **Real-time Data Sync**: Connects to Schematic's WebSocket datastream for live updates
 - **Comprehensive Entity Support**: Handles companies, users, and feature flags
@@ -15,6 +50,7 @@ A Go application that demonstrates the usage of the `schematic-datastream-ws` pa
 ## Prerequisites
 
 - Go 1.21 or later
+- Docker and Docker Compose (for containerized deployment)
 - Redis (optional, but recommended for production)
 - Valid Schematic API key
 

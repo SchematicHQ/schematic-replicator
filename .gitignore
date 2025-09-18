@@ -1,1 +1,76 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 schematic-datastream-replicator
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.out
+coverage.html
+*.cover
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Environment variables
+.env
+.env.*
+*.key
+*.pem
+*.crt
+*.p12
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker files we don't want in git
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+temp/
+temporary/
+tmp_*
+
+# Local development overrides
+local.*
+
+# Cache directories
+.cache/
+
+# Build artifacts
+dist/
+build/
+
+# Debug files
+debug
+__debug_bin*
+
+# Air live reload
+.air

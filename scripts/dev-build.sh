@@ -114,7 +114,7 @@ fi
 
 # Step 3: Stop existing containers
 log "Stopping existing containers..."
-docker compose down --remove-orphans || warn "No existing containers to stop"
+docker compose -f deployments/docker-compose.yml down --remove-orphans || warn "No existing containers to stop"
 
 # Step 4: Build Docker image
 log "Building Docker image..."
@@ -124,7 +124,7 @@ if [ "$FORCE_REBUILD" = true ]; then
     log "Force rebuild enabled - not using Docker cache"
 fi
 
-if docker compose build $BUILD_ARGS; then
+if docker compose -f deployments/docker-compose.yml build $BUILD_ARGS; then
     info "✅ Docker image built successfully"
 else
     error "❌ Docker build failed"
@@ -138,7 +138,7 @@ if [ "$DETACHED" = true ]; then
     log "Running in detached mode"
 fi
 
-if docker compose up $COMPOSE_ARGS; then
+if docker compose -f deployments/docker-compose.yml up $COMPOSE_ARGS; then
     if [ "$DETACHED" = true ]; then
         info "✅ Stack started successfully in background"
         echo ""
