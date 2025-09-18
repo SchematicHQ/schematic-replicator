@@ -38,7 +38,7 @@ The current Docker image is designed to be production-ready for third-party depl
 
 ## Configuration Changes Needed
 
-To switch registries, update these values in `.github/workflows/docker-build-push.yml`:
+To switch registries, update these values in `.github/workflows/release-docker-image.yml`:
 
 ```yaml
 env:

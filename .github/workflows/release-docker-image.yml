@@ -1,16 +1,9 @@
-name: docker-build-push
+name: release-docker-image
 
 on:
   push:
-    branches:
-      - main
-      - master
     tags:
       - 'v*.*.*'
-  pull_request:
-    branches:
-      - main
-      - master
 
 env:
   # TODO: Update these when image repository is chosen
@@ -18,44 +11,8 @@ env:
   IMAGE_NAME: schematichq/schematic-datastream-replicator
 
 jobs:
-  # Run tests first to ensure quality
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.25'
-
-      - name: Run tests
-        run: go test ./...
-
-      - name: Run tests with race detector
-        run: go test -race ./...
-
-  # Security scanning
-  security-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.25'
-
-      - name: Run Gosec Security Scanner
-        run: |
-          go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
-          gosec ./...
-
   # Build and push Docker image
   docker:
-    needs: [test, security-scan]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -70,7 +27,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -84,12 +40,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=sha,prefix={{branch}}-
+            type=raw,value=latest
 
       # Production-ready: Build for multiple architectures
       - name: Build and push Docker image
@@ -98,7 +52,7 @@ jobs:
           context: .
           file: ./deployments/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -111,7 +65,6 @@ jobs:
 
       # Security: Scan the built image
       - name: Run Trivy vulnerability scanner
-        if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
@@ -119,7 +72,6 @@ jobs:
           output: 'trivy-results.sarif'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        if: github.event_name != 'pull_request'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-results.sarif'
@@ -127,7 +79,6 @@ jobs:
   # Generate SBOM for supply chain security
   sbom:
     needs: [docker]
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
