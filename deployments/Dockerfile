@@ -1,6 +1,11 @@
 # Multi-stage Dockerfile for schematic-datastream-replicator
-# Build from parent directory with: docker build -f schematic-datastream-replicator/Dockerfile -t schematic-datastream-replicator .
+# Build from parent directory with: docker build -f deployments/Dockerfile -t schematic-datastream-replicator .
 # This approach includes all local dependencies in the build context
+
+# Build args for version information (provided by CI/CD)
+ARG BUILDTIME
+ARG VERSION
+ARG REVISION
 
 # Build stage
 FROM golang:1.25-alpine AS builder
@@ -26,15 +31,20 @@ WORKDIR /workspace/schematic-datastream-replicator
 # Download dependencies (with local replace directives working)
 RUN go mod download && go mod verify
 
-# Build the application with security flags
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags='-w -s -extldflags "-static"' \
+# Build the application with security flags and version information
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-w -s -extldflags '-static' -X main.version=${VERSION:-dev} -X main.commit=${REVISION:-unknown} -X main.buildTime=${BUILDTIME:-unknown}" \
     -a -installsuffix cgo \
     -o schematic-datastream-replicator \
     .
 
 # Runtime stage using distroless for minimal attack surface
 FROM gcr.io/distroless/static-debian12:nonroot
+
+# Re-declare build args for runtime stage
+ARG BUILDTIME
+ARG VERSION
+ARG REVISION
 
 # Health port configuration (can be overridden at build time)
 ARG HEALTH_PORT=8090
@@ -60,12 +70,16 @@ EXPOSE ${HEALTH_PORT}
 # - GET /health (liveness probe)
 # - GET /ready (readiness probe)
 
-# Set security labels
+# Set OCI labels for production readiness
 LABEL \
     org.opencontainers.image.title="Schematic Datastream Replicator" \
     org.opencontainers.image.description="High-performance datastream replicator for Schematic" \
     org.opencontainers.image.vendor="Schematic" \
     org.opencontainers.image.licenses="MIT" \
+    org.opencontainers.image.version="${VERSION:-dev}" \
+    org.opencontainers.image.revision="${REVISION:-unknown}" \
+    org.opencontainers.image.created="${BUILDTIME:-unknown}" \
+    org.opencontainers.image.source="https://github.com/SchematicHQ/schematic-datastream-replicator" \
     security.scan.enabled="true"
 
 # Run the application

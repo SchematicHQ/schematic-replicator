@@ -9,7 +9,8 @@ A high-performance, production-ready service that replicates Schematic data to R
 │   ├── DEV-README.md       # Development guide
 │   └── DOCKER.md           # Docker usage guide
 ├── scripts/                # Build and utility scripts
-│   ├── build-docker.sh     # Docker image build script
+│   ├── build-docker.sh     # Production Docker image build script
+│   ├── build-docker-local.sh # Local development Docker build script
 │   ├── dev-build.sh        # Development build script
 │   ├── setup-local-dev.sh  # Local development setup
 │   ├── check-docker-compose.sh # Docker Compose compatibility check
@@ -92,6 +93,31 @@ export REDIS_ROUTE_BY_LATENCY="true"        # Route by lowest latency
 ```bash
 export SCHEMATIC_API_KEY="your-api-key-here"
 ./replicator
+```
+
+### Docker Development
+For local development with Docker:
+
+```bash
+# Build Docker image for local development (includes git info)
+./scripts/build-docker-local.sh
+
+# Run with basic configuration
+docker run --rm \
+  -e SCHEMATIC_API_KEY="your-api-key-here" \
+  schematic-datastream-replicator:local
+
+# Run with Redis (assumes Redis running on host)
+docker run --rm \
+  -e SCHEMATIC_API_KEY="your-api-key-here" \
+  -e REDIS_ADDR="host.docker.internal:6379" \
+  schematic-datastream-replicator:local
+```
+
+You can also build manually without git info:
+```bash
+# Simple Docker build (uses default version labels)
+docker build -f deployments/Dockerfile -t schematic-datastream-replicator:local ../
 ```
 
 ### With Redis Cache (unlimited cache)
