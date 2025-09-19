@@ -22,7 +22,6 @@ import (
 
 const (
 	defaultAPIURL               = "https://api.schematichq.com"
-	defaultLocalAPIURL          = "http://localhost:8080"
 	apiKeyEnvVar                = "SCHEMATIC_API_KEY"
 	defaultCacheTTL             = 0 * time.Second // Unlimited cache by default
 	defaultCacheCleanupInterval = 1 * time.Hour   // Clean up stale cache entries every hour

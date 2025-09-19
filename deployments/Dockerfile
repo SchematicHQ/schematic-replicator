@@ -1,6 +1,5 @@
 # Multi-stage Dockerfile for schematic-datastream-replicator
-# Build from parent directory with: docker build -f deployments/Dockerfile -t schematic-datastream-replicator .
-# This approach includes all local dependencies in the build context
+# Build with: docker build -f deployments/Dockerfile -t schematic-datastream-replicator .
 
 # Build args for version information (provided by CI/CD)
 ARG BUILDTIME
@@ -20,16 +19,16 @@ RUN apk update && apk add --no-cache \
 RUN adduser -D -g '' appuser
 
 # Set working directory
-WORKDIR /workspace
+WORKDIR /app
 
-# Copy all source code (this assumes build context is the parent directory)
-COPY . .
+# Copy go mod files first for better layer caching
+COPY go.mod go.sum ./
 
-# Change to the replicator directory
-WORKDIR /workspace/schematic-datastream-replicator
-
-# Download dependencies (with local replace directives working)
+# Download dependencies
 RUN go mod download && go mod verify
+
+# Copy source code
+COPY . .
 
 # Build the application with security flags and version information
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -54,7 +53,7 @@ ENV HEALTH_PORT=${HEALTH_PORT}
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Copy the binary from builder stage
-COPY --from=builder /workspace/schematic-datastream-replicator/schematic-datastream-replicator /app/schematic-datastream-replicator
+COPY --from=builder /app/schematic-datastream-replicator /app/schematic-datastream-replicator
 
 # Use non-root user (distroless nonroot user has UID 65532)
 USER 65532:65532

@@ -30,7 +30,7 @@ error() {
 }
 
 # Check if we're in the right directory
-if [ ! -f "go.mod" ] || [ ! -f "Dockerfile" ]; then
+if [ ! -f "go.mod" ] || [ ! -f "deployments/Dockerfile" ]; then
     error "Please run this script from the schematic-datastream-replicator directory"
 fi
 
@@ -81,9 +81,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Check required environment variables
-if [ -z "${SCHEMATIC_API_KEY:-}" ]; then
-    error "SCHEMATIC_API_KEY environment variable is required"
+# Check if docker-compose.override.yml exists (API key should be configured there)
+if [ ! -f "deployments/docker-compose.override.yml" ]; then
+    warn "No docker-compose.override.yml found. Run './scripts/setup-local-dev.sh' to configure API key and local settings"
+    echo ""
+    echo "Alternatively, you can set SCHEMATIC_API_KEY as an environment variable:"
+    echo "  export SCHEMATIC_API_KEY=your_api_key_here"
+    echo "  ./scripts/dev-build.sh"
+    echo ""
+fi
+
+# Check if API key is configured (either in override file or environment)
+if [ ! -f "deployments/docker-compose.override.yml" ] && [ -z "${SCHEMATIC_API_KEY:-}" ]; then
+    error "SCHEMATIC_API_KEY must be configured either in docker-compose.override.yml or as an environment variable"
 fi
 
 log "Starting development build process..."
@@ -114,7 +124,12 @@ fi
 
 # Step 3: Stop existing containers
 log "Stopping existing containers..."
-docker compose -f deployments/docker-compose.yml down --remove-orphans || warn "No existing containers to stop"
+COMPOSE_FILES="-f deployments/docker-compose.yml"
+if [ -f "deployments/docker-compose.override.yml" ]; then
+    COMPOSE_FILES="$COMPOSE_FILES -f deployments/docker-compose.override.yml"
+    info "Using docker-compose.override.yml for local configuration"
+fi
+docker compose $COMPOSE_FILES down --remove-orphans || warn "No existing containers to stop"
 
 # Step 4: Build Docker image
 log "Building Docker image..."
@@ -124,7 +139,7 @@ if [ "$FORCE_REBUILD" = true ]; then
     log "Force rebuild enabled - not using Docker cache"
 fi
 
-if docker compose -f deployments/docker-compose.yml build $BUILD_ARGS; then
+if docker compose $COMPOSE_FILES build $BUILD_ARGS; then
     info "✅ Docker image built successfully"
 else
     error "❌ Docker build failed"
@@ -138,15 +153,15 @@ if [ "$DETACHED" = true ]; then
     log "Running in detached mode"
 fi
 
-if docker compose -f deployments/docker-compose.yml up $COMPOSE_ARGS; then
+if docker compose $COMPOSE_FILES up $COMPOSE_ARGS; then
     if [ "$DETACHED" = true ]; then
         info "✅ Stack started successfully in background"
         echo ""
         info "Useful commands:"
-        info "  docker compose logs -f                 # View all logs"
-        info "  docker compose logs -f schematic-replicator  # View app logs only"
+        info "  docker compose $COMPOSE_FILES logs -f                 # View all logs"
+        info "  docker compose $COMPOSE_FILES logs -f schematic-replicator  # View app logs only"
         info "  curl http://localhost:8090/health      # Health check"
-        info "  docker compose down                    # Stop stack"
+        info "  docker compose $COMPOSE_FILES down                    # Stop stack"
     else
         info "✅ Stack started successfully"
     fi
