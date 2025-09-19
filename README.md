@@ -1,6 +1,6 @@
 # Schematic Datastream Replicator
 
-A high-performance, production-ready service that replicates Schematic data to Redis cache for ultra-fast lookups, serving as a caching proxy between applications and the Schematic API.
+A high-pe- Reliable Redis-based caching system Mandatory Redis caching for high-performance data storageformance, production-ready service that replicates Schematic data to Redis cache for ultra-fast lookups, serving as a caching proxy between applications and the Schematic API.
 
 ## 📁 Repository Structure
 
@@ -42,7 +42,7 @@ For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 
 - **Real-time Data Sync**: Connects to Schematic's WebSocket datastream for live updates
 - **Comprehensive Entity Support**: Handles companies, users, and feature flags
-- **Redis Caching**: Configurable Redis support with automatic fallback to local cache
+- **Redis Caching**: For all deployments, The application requires Redis and will not start without a successful Redis connection.
 - **Intelligent Cache Management**: Implements TTL-based caching with stale data cleanup
 - **Structured Logging**: Context-aware logging with configurable log levels
 - **Graceful Shutdown**: Proper connection cleanup on termination signals
@@ -50,9 +50,9 @@ For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 
 ## Prerequisites
 
-- Go 1.21 or later
+- Go 1.25.1 or later
+- **Redis server** (required - application will not start without Redis connection)
 - Docker and Docker Compose (for containerized deployment)
-- Redis (optional, but recommended for production)
 - Valid Schematic API key
 
 ## Environment Variables
@@ -60,13 +60,17 @@ For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 ### Required
 - `SCHEMATIC_API_KEY`: Your Schematic API key
 
-### Optional Configuration
-- `SCHEMATIC_BASE_URL`: WebSocket endpoint (default: `ws://localhost:8080/datastream`)
+### Additional Configuration
+- `SCHEMATIC_API_URL`: Schematic API base URL (default: `https://api.schematichq.com`)
+- `SCHEMATIC_DATASTREAM_URL`: WebSocket datastream endpoint (default: auto-derived from API URL)
 - `CACHE_TTL`: Cache time-to-live (default: unlimited, format: `1h30m`, `45s`, `0s` for unlimited, etc.)
 - `CACHE_CLEANUP_INTERVAL`: Cleanup stale cache entries interval (default: `1h`, format: `30m`, `2h`, `0s` to disable)
 - `LOG_LEVEL`: Logging level - `debug`, `info`, `warn`, `error` (default: `info`)
+- `HEALTH_PORT`: Health server port (default: `8090`)
 
-### Redis Configuration
+### Redis Configuration (Required)
+
+**Note**: Redis is mandatory for the datastream replicator. The application will exit if it cannot connect to Redis.
 
 #### Single Redis Instance
 ```bash
@@ -87,12 +91,29 @@ export REDIS_MAX_REDIRECTS="8"              # Maximum cluster redirects
 export REDIS_ROUTE_BY_LATENCY="true"        # Route by lowest latency
 ```
 
+#### Quick Redis Setup
+If you don't have Redis running locally:
+```bash
+# Using Docker
+docker run -d -p 6379:6379 --name redis redis:alpine
+
+# Using Homebrew (macOS)
+brew install redis
+brew services start redis
+
+# Using apt (Ubuntu/Debian)
+sudo apt install redis-server
+sudo systemctl start redis-server
+```
+
 ## Usage
 
 ### Basic Usage
 ```bash
+# Ensure Redis is running (required)
 export SCHEMATIC_API_KEY="your-api-key-here"
-./replicator
+export REDIS_ADDR="localhost:6379"  # Default Redis address
+./schematic-datastream-replicator
 ```
 
 ### Docker Development
@@ -125,7 +146,7 @@ docker build -f deployments/Dockerfile -t schematic-datastream-replicator:local 
 export SCHEMATIC_API_KEY="your-api-key-here"
 export REDIS_ADDR="localhost:6379"
 # CACHE_TTL not set = unlimited cache (default)
-./replicator
+./schematic-datastream-replicator
 ```
 
 ### With Redis Cache (custom TTL)
@@ -133,26 +154,35 @@ export REDIS_ADDR="localhost:6379"
 export SCHEMATIC_API_KEY="your-api-key-here"
 export REDIS_ADDR="localhost:6379"
 export CACHE_TTL="10m"
-./replicator
+./schematic-datastream-replicator
 ```
 
 ### With Debug Logging
 ```bash
 export SCHEMATIC_API_KEY="your-api-key-here"
 export LOG_LEVEL="debug"
-./replicator
+./schematic-datastream-replicator
+```
+
+### Local Development (against localhost API)
+```bash
+export SCHEMATIC_API_KEY="your-dev-api-key"
+export SCHEMATIC_API_URL="http://localhost:8080"  # Local API server
+# WebSocket URL will be auto-derived as ws://localhost:8080/datastream
+export LOG_LEVEL="debug"
+./schematic-datastream-replicator
 ```
 
 ### Production Configuration (with cache expiration)
 ```bash
 export SCHEMATIC_API_KEY="your-production-api-key"
-export SCHEMATIC_BASE_URL="wss://api.schematichq.com/datastream"
+export SCHEMATIC_API_URL="https://api.schematichq.com"  # Optional, this is the default
 export REDIS_ADDR="your-redis-host:6379"
 export REDIS_PASSWORD="your-redis-password"
 export CACHE_TTL="1h"  # Set explicit TTL, or omit for unlimited cache
 export CACHE_CLEANUP_INTERVAL="30m"  # Clean stale entries every 30 minutes
 export LOG_LEVEL="info"
-./replicator
+./schematic-datastream-replicator
 ```
 
 ### Unlimited Cache with Cleanup (Recommended)
@@ -161,23 +191,41 @@ export SCHEMATIC_API_KEY="your-api-key"
 export REDIS_ADDR="localhost:6379"
 # CACHE_TTL not set = unlimited cache (default)
 export CACHE_CLEANUP_INTERVAL="1h"  # Clean up stale entries hourly (default)
-./replicator
+./schematic-datastream-replicator
 ```
 
 ## Building
 
 ```bash
 go mod tidy
-go build -o replicator .
+go build -o schematic-datastream-replicator .
 ```
+
+Or simply:
+```bash
+go build .  # Creates schematic-datastream-replicator binary
+```
+
+## URL Configuration
+
+The application supports flexible URL configuration:
+
+- **`SCHEMATIC_API_URL`**: Base API URL (default: `https://api.schematichq.com`)
+- **`SCHEMATIC_DATASTREAM_URL`**: WebSocket endpoint (optional, auto-derived if not set)
+
+### URL Auto-Derivation
+If `SCHEMATIC_DATASTREAM_URL` is not explicitly set, the application automatically converts the API URL:
+- `https://api.schematichq.com` → `wss://api.schematichq.com/datastream`
+- `http://localhost:8080` → `ws://localhost:8080/datastream`
+
+This means you typically only need to set `SCHEMATIC_API_URL` for both REST API and WebSocket connections.
 
 ## Architecture
 
 ### Caching System
-The application implements a sophisticated caching system inspired by schematic-go:
+The application implements a Redis-based caching system for high-performance data replication:
 
-- **Cache Providers**: Generic interface supporting both Redis and local cache
-- **Automatic Fallback**: Falls back to local cache if Redis is unavailable
+- **Redis-Only**: Uses Redis as the exclusive cache provider (no local cache fallback)
 - **TTL Management**: Configurable time-to-live for cached entries
 - **Paginated Data Loading**: Efficiently loads all companies and users through paginated API requests (100 items per page)
 - **Stale Data Cleanup**: Removes outdated cache entries during bulk updates and periodic version cleanup
@@ -241,7 +289,7 @@ The application uses structured logging with the following levels:
 
 - **DEBUG**: Detailed WebSocket and cache operations
 - **INFO**: General application flow and statistics
-- **WARN**: Non-fatal issues (Redis fallback, unknown entities)
+- **WARN**: Non-fatal issues (unknown entities, configuration warnings)
 - **ERROR**: Connection failures and data processing errors
 
 Log format:
@@ -276,7 +324,7 @@ Example output:
 ## Error Handling
 
 - **Connection Failures**: Automatic reconnection with exponential backoff
-- **Redis Failures**: Graceful fallback to local caching
+- **Redis Failures**: Application will exit if Redis connection fails
 - **Data Parsing Errors**: Logged without stopping the application
 - **Cache Errors**: Logged with specific error details and cache keys
 
@@ -297,7 +345,7 @@ Example output:
 
 ### Local Development
 ```bash
-# Start local Redis (optional)
+# Start local Redis (required)
 docker run -d -p 6379:6379 redis:alpine
 
 # Run with debug logging
