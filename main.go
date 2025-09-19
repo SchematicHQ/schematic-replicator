@@ -32,7 +32,7 @@ const (
 	cacheKeyPrefixFlags         = "flags"
 )
 
-// HealthServer provides health and readiness endpoints
+// HealthServer provides health and readiness endpoints for container orchestration
 type HealthServer struct {
 	datastreamClient *schematicdatastreamws.Client
 	redisClient      interface{}
@@ -41,13 +41,41 @@ type HealthServer struct {
 	mu               sync.RWMutex
 }
 
+// HealthStatusType represents the overall health status
+type HealthStatusType string
+
+const (
+	HealthStatusHealthy   HealthStatusType = "healthy"
+	HealthStatusUnhealthy HealthStatusType = "unhealthy"
+)
+
+// ReadinessStatusType represents the readiness status
+type ReadinessStatusType string
+
+const (
+	ReadinessStatusReady    ReadinessStatusType = "ready"
+	ReadinessStatusNotReady ReadinessStatusType = "not_ready"
+)
+
+// ComponentStatusType represents individual component status
+type ComponentStatusType string
+
+const (
+	ComponentStatusConnected        ComponentStatusType = "connected"
+	ComponentStatusDisconnected     ComponentStatusType = "disconnected"
+	ComponentStatusReady            ComponentStatusType = "ready"
+	ComponentStatusConnectedLoading ComponentStatusType = "connected_loading"
+	ComponentStatusNotReady         ComponentStatusType = "not_ready"
+	ComponentStatusUnknown          ComponentStatusType = "unknown"
+)
+
 // HealthStatus represents the health status response
 type HealthStatus struct {
-	Status     string            `json:"status"`
-	Ready      bool              `json:"ready"`
-	Connected  bool              `json:"connected"`
-	Components map[string]string `json:"components"`
-	Timestamp  time.Time         `json:"timestamp"`
+	Status     HealthStatusType               `json:"status"`
+	Ready      bool                           `json:"ready"`
+	Connected  bool                           `json:"connected"`
+	Components map[string]ComponentStatusType `json:"components"`
+	Timestamp  time.Time                      `json:"timestamp"`
 }
 
 // NewHealthServer creates a new health server
@@ -90,43 +118,37 @@ func (hs *HealthServer) Stop() {
 }
 
 // healthHandler handles the /health endpoint (liveness probe)
+// Returns healthy if the process is alive and Redis is connected
 func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	hs.mu.RLock()
 	defer hs.mu.RUnlock()
 
 	status := HealthStatus{
-		Status:    "ok",
+		Status:    HealthStatusHealthy,
 		Ready:     false,
 		Connected: false,
-		Components: map[string]string{
-			"redis":      "unknown",
-			"datastream": "unknown",
+		Components: map[string]ComponentStatusType{
+			"redis":      ComponentStatusConnected, // Redis is assumed healthy if we got this far (connection tested at startup)
+			"datastream": ComponentStatusUnknown,
 		},
 		Timestamp: time.Now(),
 	}
 
-	// Check datastream connection
+	// Check datastream connection (for informational purposes)
 	if hs.datastreamClient != nil {
 		status.Connected = hs.datastreamClient.IsConnected()
 		status.Ready = hs.datastreamClient.IsReady()
+
 		if status.Connected {
-			status.Components["datastream"] = "connected"
+			status.Components["datastream"] = ComponentStatusConnected
 		} else {
-			status.Components["datastream"] = "disconnected"
+			status.Components["datastream"] = ComponentStatusDisconnected
 		}
 	}
 
-	// Redis is assumed healthy if we got this far (connection tested at startup)
-	status.Components["redis"] = "connected"
-
-	// Overall status
-	if !status.Connected {
-		status.Status = "unhealthy"
-		w.WriteHeader(http.StatusServiceUnavailable)
-	} else {
-		w.WriteHeader(http.StatusOK)
-	}
-
+	// Liveness check: Process is healthy if Redis is working
+	// Datastream connectivity issues don't make the process unhealthy (it can retry)
+	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(status); err != nil {
 		hs.logger.Error(context.Background(), fmt.Sprintf("Failed to encode health status: %v", err))
@@ -134,40 +156,44 @@ func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // readinessHandler handles the /ready endpoint (readiness probe)
+// Returns ready only when connected to datastream and initial data is loaded
 func (hs *HealthServer) readinessHandler(w http.ResponseWriter, r *http.Request) {
 	hs.mu.RLock()
 	defer hs.mu.RUnlock()
 
 	ready := false
+	connected := false
+
 	if hs.datastreamClient != nil {
+		connected = hs.datastreamClient.IsConnected()
 		ready = hs.datastreamClient.IsReady()
 	}
 
 	status := HealthStatus{
-		Status:    "not_ready",
+		Status:    HealthStatusHealthy, // Will be updated based on readiness
 		Ready:     ready,
-		Connected: false,
-		Components: map[string]string{
-			"redis":      "connected",
-			"datastream": "not_ready",
+		Connected: connected,
+		Components: map[string]ComponentStatusType{
+			"redis":      ComponentStatusConnected,
+			"datastream": ComponentStatusNotReady,
 		},
 		Timestamp: time.Now(),
 	}
 
-	if hs.datastreamClient != nil {
-		status.Connected = hs.datastreamClient.IsConnected()
-		if ready {
-			status.Status = "ready"
-			status.Components["datastream"] = "ready"
-			w.WriteHeader(http.StatusOK)
-		} else if status.Connected {
-			status.Components["datastream"] = "connected"
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			status.Components["datastream"] = "disconnected"
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
+	if ready {
+		// Fully ready: connected and initial data loaded
+		status.Status = HealthStatusHealthy
+		status.Components["datastream"] = ComponentStatusReady
+		w.WriteHeader(http.StatusOK)
+	} else if connected {
+		// Connected but still loading initial data
+		status.Status = HealthStatusHealthy // Still healthy, just not ready yet
+		status.Components["datastream"] = ComponentStatusConnectedLoading
+		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
+		// Not connected at all
+		status.Status = HealthStatusHealthy // Health endpoint should still return healthy
+		status.Components["datastream"] = ComponentStatusDisconnected
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
