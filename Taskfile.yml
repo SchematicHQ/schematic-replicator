@@ -1,0 +1,167 @@
+# Taskfile for schematic-datastream-replicator
+# Provides convenient commands for development and deployment
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  DOCKER_COMPOSE_FILE: deployments/docker-compose.yml
+  BINARY_NAME: schematic-datastream-replicator
+  HEALTH_URL: http://localhost:8090/health
+  READY_URL: http://localhost:8090/ready
+
+tasks:
+  # Default task - show help
+  default:
+    desc: Show available tasks
+    cmd: task --list
+
+  # Build commands
+  build:
+    desc: Build the Go binary locally
+    cmds:
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
+        -ldflags='-w -s -extldflags "-static"'
+        -a -installsuffix cgo
+        -o {{.BINARY_NAME}}
+        .
+
+  build-docker:
+    desc: Build Docker image with security checks
+    cmd: ./scripts/build-docker.sh
+
+  build-docker-fast:
+    desc: Build Docker image without security checks
+    cmd: ./scripts/build-docker.sh --no-scan --no-test
+
+  # Development commands
+  run:
+    desc: Run the application locally
+    cmd: go run .
+
+  test:
+    desc: Run Go tests
+    cmd: go test -v ./...
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -f {{.BINARY_NAME}}
+      - go clean
+
+  # Docker Compose commands
+  docker-up:
+    desc: Start services with docker compose
+    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} up -d
+
+  docker-down:
+    desc: Stop services with docker compose
+    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} down
+
+  docker-logs:
+    desc: Show docker compose logs
+    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
+
+  docker-restart:
+    desc: Restart services
+    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} restart
+
+  docker-clean:
+    desc: Clean up docker resources
+    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} down -v --rmi all
+
+  # Static analysis and security
+  lint:
+    desc: Run linters
+    cmds:
+      - |
+        if command -v golangci-lint >/dev/null 2>&1; then
+          golangci-lint run
+        else
+          echo "golangci-lint not installed, skipping..."
+          go vet ./...
+          go fmt ./...
+        fi
+
+  security-scan:
+    desc: Run security analysis
+    cmds:
+      - |
+        if command -v gosec >/dev/null 2>&1; then
+          gosec ./...
+        else
+          echo "gosec not installed, install with: go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest"
+        fi
+
+  # Development workflow
+  dev-setup:
+    desc: Set up local development environment (one-time setup)
+    cmd: ./scripts/setup-local-dev.sh
+
+  dev-build:
+    desc: Build and restart development stack
+    cmds:
+      - echo "Building and restarting development stack..."
+      - ./scripts/dev-build.sh --detached
+
+  dev-rebuild:
+    desc: Force rebuild and restart development stack
+    cmds:
+      - echo "Force rebuilding and restarting development stack..."
+      - ./scripts/dev-build.sh --force-rebuild --detached
+
+  dev-logs:
+    desc: View development logs
+    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
+
+  dev-exec:
+    desc: Execute shell in development container
+    cmds:
+      - echo "Opening shell in development container..."
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} exec schematic-replicator sh || echo "Container not running - start with 'task dev-build'"
+
+  dev-down:
+    desc: Stop development environment
+    cmds:
+      - echo "Stopping development environment..."
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} down
+
+  dev-clean:
+    desc: Clean development environment (nuclear option)
+    cmds:
+      - echo "Cleaning development environment..."
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} down --rmi all --volumes --remove-orphans || true
+      - docker image prune -f
+
+  # System checks
+  docker-check:
+    desc: Check Docker Compose compatibility
+    cmds:
+      - echo "Checking Docker Compose compatibility..."
+      - ./scripts/check-docker-compose.sh
+
+  # Health checks
+  health-check:
+    desc: Check if the service is healthy
+    cmd: curl -f {{.HEALTH_URL}} || echo "Health check failed"
+
+  ready-check:
+    desc: Check if the service is ready
+    cmd: curl -f {{.READY_URL}} || echo "Ready check failed"
+
+  # Production deployment helpers
+  deploy-prod:
+    desc: Build and prepare for production deployment
+    deps: [build-docker]
+    cmds:
+      - echo "Production deployment preparation complete"
+      - echo "Docker image: {{.BINARY_NAME}}:latest"
+
+  # Composite commands for common workflows
+  quick:
+    desc: "Quick: build, test, and start development stack"
+    deps: [build, test, dev-build]
+
+  fresh:
+    desc: "Fresh: clean everything and rebuild from scratch"
+    deps: [dev-down, dev-clean, dev-build]
