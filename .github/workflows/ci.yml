@@ -4,7 +4,7 @@ on: [push]
 
 jobs:
   compile:
-    runs-on: ${{ github.run_id }}/runner=1cpu-linux-arm64
+    runs-on: runs-on=${{ github.run_id }}/runner=1cpu-linux-arm64
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
@@ -18,7 +18,7 @@ jobs:
         run: go build ./...
 
   test:
-    runs-on: ${{ github.run_id }}/runner=1cpu-linux-arm64
+    runs-on: runs-on=${{ github.run_id }}/runner=1cpu-linux-arm64
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
