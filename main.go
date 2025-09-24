@@ -327,14 +327,10 @@ func main() {
 	// Create connection ready handler (wsClient will be set later)
 	connectionReadyHandler := NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, logger, cacheTTL)
 
-	// Set up headers with API key
-	headers := http.Header{}
-	headers.Set("X-Schematic-Api-Key", apiKey)
-
 	// Configure the WebSocket client
 	wsOptions := schematicdatastreamws.ClientOptions{
 		URL:                    datastreamURL,
-		Headers:                headers,
+		ApiKey:                 apiKey,
 		MessageHandler:         messageHandler.HandleMessage,
 		ConnectionReadyHandler: connectionReadyHandler.OnConnectionReady,
 		Logger:                 logger,
