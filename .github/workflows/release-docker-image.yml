@@ -6,32 +6,31 @@ on:
       - 'v*.*.*'
 
 env:
-  # TODO: Update these when image repository is chosen
-  REGISTRY: ghcr.io  # GitHub Container Registry as default
-  IMAGE_NAME: schematichq/schematic-datastream-replicator
+  # Docker Hub registry configuration
+  REGISTRY: docker.io
+  IMAGE_NAME: schematichq/datastream-replicator
 
 jobs:
   # Build and push Docker image
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.run_id }}/runner=4cpu-linux-arm64
     permissions:
       contents: read
-      packages: write
       security-events: write
     
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Container Registry
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # For production readiness: multi-platform builds
       - name: Extract metadata
@@ -47,7 +46,7 @@ jobs:
 
       # Production-ready: Build for multiple architectures
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./deployments/Dockerfile
@@ -65,31 +64,25 @@ jobs:
 
       # Security: Scan the built image
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-
-      - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-results.sarif'
+          format: 'table'
+          # Output will be shown in the GitHub Actions log
 
   # Generate SBOM for supply chain security
   sbom:
     needs: [docker]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.run_id }}/runner=1cpu-linux-arm64
     permissions:
       contents: read
-      packages: read
     
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@v0.17.2
         with:
           path: .
           format: spdx-json

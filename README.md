@@ -35,6 +35,28 @@ A high-pe- Reliable Redis-based caching system Mandatory Redis caching for high-
 
 ## 🚀 Quick Start
 
+### Customer Installation (Docker)
+
+Pull and run the latest version from Docker Hub:
+
+```bash
+# Pull the latest image
+docker pull schematichq/datastream-replicator:latest
+
+# Run with your Schematic API key and Redis connection
+docker run -d \
+  --name schematic-replicator \
+  -p 8090:8090 \
+  -e SCHEMATIC_API_KEY="your-api-key-here" \
+  -e REDIS_URL="redis://your-redis-host:6379" \
+  schematichq/datastream-replicator:latest
+
+# Check health status
+curl http://localhost:8090/health
+```
+
+### Development Setup
+
 For detailed development setup, see [docs/DEV-README.md](docs/DEV-README.md).
 For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 
@@ -327,6 +349,27 @@ Example output:
 - **Redis Failures**: Application will exit if Redis connection fails
 - **Data Parsing Errors**: Logged without stopping the application
 - **Cache Errors**: Logged with specific error details and cache keys
+
+## Docker Image Versions
+
+The application is distributed via Docker Hub with automatic semantic versioning:
+
+### Available Tags
+- `schematichq/datastream-replicator:latest` - Latest stable release
+- `schematichq/datastream-replicator:v1.0.0` - Specific version (example)
+- `schematichq/datastream-replicator:1.0.0` - Version without 'v' prefix
+- `schematichq/datastream-replicator:1` - Major version
+
+### Platform Support
+Images are built for multiple architectures:
+- `linux/amd64` - Intel/AMD processors
+- `linux/arm64` - ARM processors (Apple Silicon, ARM servers)
+
+### Image Features
+- **Minimal Size**: Based on distroless images for security
+- **Non-root User**: Runs as UID 65532 for enhanced security
+- **Health Endpoints**: Built-in `/health` and `/ready` endpoints
+- **Vulnerability Scanning**: All images are scanned for security issues
 
 ## Performance Considerations
 
