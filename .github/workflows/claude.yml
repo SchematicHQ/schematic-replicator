@@ -19,13 +19,14 @@ jobs:
       issues: write
       security-events: write
       packages: write
+      actions: read
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v5
         with:
             role-to-assume: ${{ vars.DEV_AWS_ROLE_ARN }}
             aws-region: ${{ vars.DEV_AWS_REGION }}
