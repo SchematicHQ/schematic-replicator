@@ -432,6 +432,75 @@ Images are built for multiple architectures:
 - **Health Endpoints**: Built-in `/health` and `/ready` endpoints
 - **Vulnerability Scanning**: All images are scanned for security issues
 
+## Client Integration
+
+### DataStream
+
+The Schematic Go client can be configured to work with the datastream replicator service for ultra-fast feature flag evaluations.
+
+#### Replicator Mode
+
+When running an external schematic-datastream-replicator service, you can configure your Schematic client to use replicator mode. In this mode, the client connects to the replicator service instead of directly to Schematic's WebSocket API, and the replicator handles all data streaming and caching automatically.
+
+##### Example Usage
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    
+    schematic "github.com/SchematicHQ/schematic-go"
+    "github.com/SchematicHQ/schematic-go/core"
+)
+
+func main() {
+    client := schematic.NewClient(
+        core.WithAPIKey("your-api-key"),
+        core.WithDatastream(
+            core.WithReplicatorMode(),
+        ),
+    )
+    
+    // Client will now use replicator mode for all feature flag evaluations
+    ctx := context.Background()
+    flagValue, err := client.Features.CheckFlag(ctx, &core.CheckFlagRequestBody{
+        Flag: "my-flag",
+        Company: core.EntityInput{
+            Keys: map[string]string{"id": "company-123"},
+        },
+    })
+    
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    log.Printf("Flag value: %v", flagValue.Flag)
+}
+```
+
+##### Advanced Configuration (Optional)
+
+The client automatically configures sensible defaults for replicator mode, but you can customize the configuration if needed:
+
+```go
+client := schematic.NewClient(
+    core.WithAPIKey("your-api-key"),
+    core.WithDatastream(
+        core.WithReplicatorMode(),
+        core.WithReplicatorHealthURL("http://my-replicator:8090/ready"),
+        core.WithReplicatorHealthInterval(60*time.Second),
+    ),
+)
+```
+
+##### Default Configuration
+
+- **Replicator Health URL**: `http://localhost:8090/ready`
+- **Health Check Interval**: 30 seconds
+- **Cache TTL**: 24 hours (handled automatically by the replicator)
+
 ## Performance Considerations
 
 - **Memory Usage**: Redis-only caching with no local cache limits
