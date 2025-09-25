@@ -1,6 +1,6 @@
 # Schematic Datastream Replicator
 
-A high-pe- Reliable Redis-based caching system Mandatory Redis caching for high-performance data storageformance, production-ready service that replicates Schematic data to Redis cache for ultra-fast lookups, serving as a caching proxy between applications and the Schematic API.
+A high-performance, production-ready service that replicates Schematic data to Redis cache for ultra-fast lookups, serving as a caching proxy between applications and the Schematic API. Features reliable Redis-based caching system with mandatory Redis caching for high-performance data storage.
 
 ## 📁 Repository Structure
 
@@ -64,7 +64,7 @@ For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 
 - **Real-time Data Sync**: Connects to Schematic's WebSocket datastream for live updates
 - **Comprehensive Entity Support**: Handles companies, users, and feature flags
-- **Redis Caching**: For all deployments, The application requires Redis and will not start without a successful Redis connection.
+- **Redis Caching**: For all deployments, the application requires Redis and will not start without a successful Redis connection.
 - **Intelligent Cache Management**: Implements TTL-based caching with stale data cleanup
 - **Structured Logging**: Context-aware logging with configurable log levels
 - **Graceful Shutdown**: Proper connection cleanup on termination signals
@@ -373,7 +373,7 @@ Images are built for multiple architectures:
 
 ## Performance Considerations
 
-- **Memory Usage**: Local cache is limited to 1000 entries by default
+- **Memory Usage**: Redis-only caching with no local cache limits
 - **Network Efficiency**: Only requests data once per connection
 - **Cache Efficiency**: Uses TTL expiration to balance freshness and performance
 - **Batch Operations**: Processes bulk updates efficiently with minimal Redis calls
