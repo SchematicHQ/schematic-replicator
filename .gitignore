@@ -5,6 +5,7 @@
 *.so
 *.dylib
 schematic-datastream-replicator
+schematic-replicator
 
 # Test binary, built with `go test -c`
 *.test
