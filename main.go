@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -292,10 +293,10 @@ func main() {
 		log.Fatalf("Redis connection failed: %v", err)
 	}
 
-	logger.Info(context.Background(), "Using Redis cache")
-	companiesCache = NewRedisCache[*rulesengine.Company](redisClient, cacheTTL)
-	usersCache = NewRedisCache[*rulesengine.User](redisClient, cacheTTL)
-	featuresCache = NewRedisCache[*rulesengine.Flag](redisClient, cacheTTL)
+	logger.Info(context.Background(), "Using Redis cache with batch support")
+	companiesCache = NewRedisBatchCache[*rulesengine.Company](redisClient, cacheTTL)
+	usersCache = NewRedisBatchCache[*rulesengine.User](redisClient, cacheTTL)
+	featuresCache = NewRedisBatchCache[*rulesengine.Flag](redisClient, cacheTTL)
 
 	// Initialize cache cleanup manager (only if cleanup is enabled)
 	var cacheCleanupManager *CacheCleanupManager
@@ -321,8 +322,80 @@ func main() {
 	// Initialize datastream WebSocket client (will be configured later)
 	var datastreamClient *schematicdatastreamws.Client
 
-	// Create message handler with caching
-	messageHandler := NewReplicatorMessageHandler(logger, companiesCache, usersCache, featuresCache, cacheTTL)
+	// Get async configuration from environment or use defaults
+	asyncConfig := DefaultAsyncConfig()
+
+	// Auto-detect or configure number of workers
+	if numWorkersStr := os.Getenv("NUM_WORKERS"); numWorkersStr != "" {
+		if numWorkers, err := strconv.Atoi(numWorkersStr); err == nil && numWorkers > 0 {
+			asyncConfig.NumWorkers = numWorkers
+		}
+	}
+
+	// If still 0 (default), auto-detect based on CPU cores with reasonable bounds
+	if asyncConfig.NumWorkers == 0 {
+		numCPU := runtime.NumCPU()
+		workers := numCPU
+		if workers < 2 {
+			workers = 2 // Minimum for small systems
+		}
+		if workers > 16 {
+			workers = 16 // Cap for large systems to avoid resource exhaustion
+		}
+		asyncConfig.NumWorkers = workers
+	}
+
+	if batchSizeStr := os.Getenv("BATCH_SIZE"); batchSizeStr != "" {
+		if batchSize, err := strconv.Atoi(batchSizeStr); err == nil && batchSize > 0 {
+			asyncConfig.BatchSize = batchSize
+		}
+	}
+
+	if batchTimeoutStr := os.Getenv("BATCH_TIMEOUT"); batchTimeoutStr != "" {
+		if batchTimeout, err := time.ParseDuration(batchTimeoutStr); err == nil {
+			asyncConfig.BatchTimeout = batchTimeout
+		}
+	}
+
+	// Channel size configuration for memory management
+	if companyChanSizeStr := os.Getenv("COMPANY_CHANNEL_SIZE"); companyChanSizeStr != "" {
+		if size, err := strconv.Atoi(companyChanSizeStr); err == nil && size > 0 {
+			asyncConfig.CompanyChannelSize = size
+		}
+	}
+
+	if userChanSizeStr := os.Getenv("USER_CHANNEL_SIZE"); userChanSizeStr != "" {
+		if size, err := strconv.Atoi(userChanSizeStr); err == nil && size > 0 {
+			asyncConfig.UserChannelSize = size
+		}
+	}
+
+	if flagsChanSizeStr := os.Getenv("FLAGS_CHANNEL_SIZE"); flagsChanSizeStr != "" {
+		if size, err := strconv.Atoi(flagsChanSizeStr); err == nil && size > 0 {
+			asyncConfig.FlagsChannelSize = size
+		}
+	}
+
+	// Circuit breaker configuration for customer environment resilience
+	if cbThresholdStr := os.Getenv("CIRCUIT_BREAKER_THRESHOLD"); cbThresholdStr != "" {
+		if threshold, err := strconv.Atoi(cbThresholdStr); err == nil && threshold > 0 {
+			asyncConfig.CircuitBreakerThreshold = threshold
+		}
+	}
+
+	if cbTimeoutStr := os.Getenv("CIRCUIT_BREAKER_TIMEOUT"); cbTimeoutStr != "" {
+		if timeout, err := time.ParseDuration(cbTimeoutStr); err == nil {
+			asyncConfig.CircuitBreakerTimeout = timeout
+		}
+	}
+
+	logger.Info(context.Background(), fmt.Sprintf("Async processing config: workers=%d, batch_size=%d, batch_timeout=%v, channels=[company:%d, user:%d, flags:%d], circuit_breaker=[threshold:%d, timeout:%v]",
+		asyncConfig.NumWorkers, asyncConfig.BatchSize, asyncConfig.BatchTimeout,
+		asyncConfig.CompanyChannelSize, asyncConfig.UserChannelSize, asyncConfig.FlagsChannelSize,
+		asyncConfig.CircuitBreakerThreshold, asyncConfig.CircuitBreakerTimeout))
+
+	// Create async message handler with caching and batching
+	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, logger, cacheTTL, asyncConfig)
 
 	// Create connection ready handler (wsClient will be set later)
 	connectionReadyHandler := NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, logger, cacheTTL)
@@ -371,6 +444,24 @@ func main() {
 		}
 	}()
 
+	// Monitor async handler metrics
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				processed, dropped := messageHandler.GetMetrics()
+				if processed > 0 || dropped > 0 {
+					logger.Info(context.Background(), fmt.Sprintf("Message metrics: processed=%d, dropped=%d", processed, dropped))
+				}
+			case <-sigChan:
+				return
+			}
+		}
+	}()
+
 	// Wait for shutdown signal
 	<-sigChan
 	logger.Info(context.Background(), "Received shutdown signal, closing connection...")
@@ -379,6 +470,16 @@ func main() {
 	if cacheCleanupManager != nil {
 		cacheCleanupManager.Stop()
 		logger.Info(context.Background(), "Cache cleanup manager stopped")
+	}
+
+	// Stop async message handler
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	if err := messageHandler.Shutdown(shutdownCtx); err != nil {
+		logger.Error(context.Background(), fmt.Sprintf("Error shutting down async handler: %v", err))
+	} else {
+		logger.Info(context.Background(), "Async message handler stopped")
 	}
 
 	// Stop health server

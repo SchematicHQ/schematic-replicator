@@ -90,6 +90,24 @@ For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 - `LOG_LEVEL`: Logging level - `debug`, `info`, `warn`, `error` (default: `info`)
 - `HEALTH_PORT`: Health server port (default: `8090`)
 
+### Async Processing Configuration (Performance Tuning)
+These settings allow you to optimize performance for your specific infrastructure and workload:
+
+- `NUM_WORKERS`: Number of worker goroutines per entity type (default: auto-detected = CPU cores, capped at 2-16 range)
+- `BATCH_SIZE`: Messages processed per batch for Redis operations (default: `5` - optimized for low latency)
+- `BATCH_TIMEOUT`: Maximum wait time before processing partial batches (default: `10ms` - prioritizes responsiveness)
+- `COMPANY_CHANNEL_SIZE`: Buffer size for company message queue (default: `200`)
+- `USER_CHANNEL_SIZE`: Buffer size for user message queue (default: `200`)
+- `FLAGS_CHANNEL_SIZE`: Buffer size for flags message queue (default: `50`)
+- `CIRCUIT_BREAKER_THRESHOLD`: Redis failures before circuit breaker opens (default: `3`)
+- `CIRCUIT_BREAKER_TIMEOUT`: Circuit breaker recovery timeout (default: `15s`)
+
+**Performance Guidelines**:
+- **Low Latency**: Use smaller batch sizes (1-5) and shorter timeouts (5-15ms)
+- **High Throughput**: Use larger batch sizes (10-50) and longer timeouts (25-100ms)
+- **Memory Constrained**: Reduce channel sizes (50-100 each)
+- **High CPU**: Increase worker count up to 2x CPU cores
+
 ### Redis Configuration (Required)
 
 **Note**: Redis is mandatory for the datastream replicator. The application will exit if it cannot connect to Redis.
@@ -176,6 +194,49 @@ export REDIS_ADDR="localhost:6379"
 export SCHEMATIC_API_KEY="your-api-key-here"
 export REDIS_ADDR="localhost:6379"
 export CACHE_TTL="10m"
+./schematic-datastream-replicator
+```
+
+### Customer Deployment Examples
+
+#### Small Scale / Low Resource Environment
+```bash
+export SCHEMATIC_API_KEY="your-api-key-here"
+export REDIS_ADDR="localhost:6379"
+export NUM_WORKERS="2"                    # Minimal workers for small systems
+export BATCH_SIZE="3"                     # Small batches for low latency
+export BATCH_TIMEOUT="5ms"                # Very responsive
+export COMPANY_CHANNEL_SIZE="50"          # Small memory footprint
+export USER_CHANNEL_SIZE="50"
+export FLAGS_CHANNEL_SIZE="25"
+./schematic-datastream-replicator
+```
+
+#### High Traffic / Low Latency Environment
+```bash
+export SCHEMATIC_API_KEY="your-api-key-here"
+export REDIS_ADDR="localhost:6379"
+export NUM_WORKERS="8"                    # More workers for high concurrency
+export BATCH_SIZE="5"                     # Balanced for latency
+export BATCH_TIMEOUT="10ms"               # Default responsive setting
+export COMPANY_CHANNEL_SIZE="500"         # Larger buffers for traffic spikes
+export USER_CHANNEL_SIZE="500"
+export FLAGS_CHANNEL_SIZE="100"
+export CIRCUIT_BREAKER_THRESHOLD="5"      # More tolerance for transient failures
+./schematic-datastream-replicator
+```
+
+#### High Throughput / Resource Rich Environment
+```bash
+export SCHEMATIC_API_KEY="your-api-key-here"
+export REDIS_ADDR="localhost:6379"
+export NUM_WORKERS="12"                   # Maximum workers
+export BATCH_SIZE="20"                    # Larger batches for throughput
+export BATCH_TIMEOUT="50ms"               # Allow batching for efficiency
+export COMPANY_CHANNEL_SIZE="1000"        # Large buffers
+export USER_CHANNEL_SIZE="1000"
+export FLAGS_CHANNEL_SIZE="200"
+export CIRCUIT_BREAKER_TIMEOUT="30s"      # Longer recovery time
 ./schematic-datastream-replicator
 ```
 
