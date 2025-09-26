@@ -62,7 +62,7 @@ build_with_local_deps() {
     docker build \
         --platform linux/amd64 \
         --tag "$tag" \
-        --file Dockerfile \
+        --file deployments/Dockerfile \
         --build-arg VERSION="$VERSION" \
         --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
         --build-arg VCS_REF="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
@@ -89,7 +89,7 @@ build_standalone() {
     docker build \
         --platform linux/amd64 \
         --tag "$tag" \
-        --file Dockerfile.standalone \
+        --file deployments/Dockerfile.standalone \
         --build-arg VERSION="$VERSION" \
         --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
         --build-arg VCS_REF="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \

@@ -1,0 +1,127 @@
+# .dockerignore - Minimize build context for security and performance
+# Note: Build context is parent directory (../) so paths are relative to workspace root
+
+# Git directories (all repositories in workspace)
+.git/
+**/.git/
+.gitignore
+**/.gitignore
+.gitattributes
+**/.gitattributes
+
+# Documentation (exclude from all projects)
+README.md
+**/*.md
+**/docs/
+
+# IDE and editor files
+.vscode/
+.idea/
+**/.vscode/
+**/.idea/
+*.swp
+*.swo
+*~
+**/*.swp
+**/*.swo
+**/*~
+
+# OS generated files
+.DS_Store
+**/.DS_Store
+.DS_Store?
+**/.DS_Store?
+._*
+**/._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+**/Thumbs.db
+
+# Test files from all Go projects
+**/*_test.go
+**/test/
+**/tests/
+**/testdata/
+
+# Build artifacts from all projects
+**/schematic-datastream-replicator
+**/schematic-go
+**/schematic-datastream-ws
+**/*.exe
+**/*.exe~
+**/*.dll
+**/*.so
+**/*.dylib
+**/*.test
+
+# Coverage reports
+**/coverage.out
+**/coverage.html
+**/*.cover
+**/*.out
+
+# Environment files (security - exclude from all projects)
+.env
+**/.env
+.env.*
+**/.env.*
+*.key
+**/*.key
+*.pem
+**/*.pem
+*.crt
+**/*.crt
+*.p12
+**/*.p12
+
+# Temporary files and directories
+tmp/
+**/tmp/
+temp/
+**/temp/
+.tmp/
+**/.tmp/
+
+# Docker files (don't include Docker configs in image)
+Dockerfile*
+**/Dockerfile*
+docker-compose*
+**/docker-compose*
+.dockerignore
+**/.dockerignore
+
+# Logs
+*.log
+**/*.log
+logs/
+**/logs/
+
+# Local development files
+local.*
+**/local.*
+
+# Cache directories
+.cache/
+**/.cache/
+
+# Go workspace files
+go.work
+**/go.work
+
+# Node.js (if any frontend components exist)
+node_modules/
+**/node_modules/
+npm-debug.log*
+**/npm-debug.log*
+
+# Air live reload
+.air
+**/.air
+
+# Debug files
+debug
+**/debug
+__debug_bin*
+**/__debug_bin*

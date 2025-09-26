@@ -8,8 +8,8 @@ name: schematic-datastream
 services:
   schematic-replicator:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: deployments/Dockerfile
       platforms:
         - linux/amd64
       args:

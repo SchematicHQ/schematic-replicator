@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +23,6 @@ import (
 
 const (
 	defaultAPIURL               = "https://api.schematichq.com"
-	defaultLocalAPIURL          = "http://localhost:8080"
 	apiKeyEnvVar                = "SCHEMATIC_API_KEY"
 	defaultCacheTTL             = 0 * time.Second // Unlimited cache by default
 	defaultCacheCleanupInterval = 1 * time.Hour   // Clean up stale cache entries every hour
@@ -33,7 +33,7 @@ const (
 	cacheKeyPrefixFlags         = "flags"
 )
 
-// HealthServer provides health and readiness endpoints
+// HealthServer provides health and readiness endpoints for container orchestration
 type HealthServer struct {
 	datastreamClient *schematicdatastreamws.Client
 	redisClient      interface{}
@@ -42,13 +42,41 @@ type HealthServer struct {
 	mu               sync.RWMutex
 }
 
+// HealthStatusType represents the overall health status
+type HealthStatusType string
+
+const (
+	HealthStatusHealthy   HealthStatusType = "healthy"
+	HealthStatusUnhealthy HealthStatusType = "unhealthy"
+)
+
+// ReadinessStatusType represents the readiness status
+type ReadinessStatusType string
+
+const (
+	ReadinessStatusReady    ReadinessStatusType = "ready"
+	ReadinessStatusNotReady ReadinessStatusType = "not_ready"
+)
+
+// ComponentStatusType represents individual component status
+type ComponentStatusType string
+
+const (
+	ComponentStatusConnected        ComponentStatusType = "connected"
+	ComponentStatusDisconnected     ComponentStatusType = "disconnected"
+	ComponentStatusReady            ComponentStatusType = "ready"
+	ComponentStatusConnectedLoading ComponentStatusType = "connected_loading"
+	ComponentStatusNotReady         ComponentStatusType = "not_ready"
+	ComponentStatusUnknown          ComponentStatusType = "unknown"
+)
+
 // HealthStatus represents the health status response
 type HealthStatus struct {
-	Status     string            `json:"status"`
-	Ready      bool              `json:"ready"`
-	Connected  bool              `json:"connected"`
-	Components map[string]string `json:"components"`
-	Timestamp  time.Time         `json:"timestamp"`
+	Status     HealthStatusType               `json:"status"`
+	Ready      bool                           `json:"ready"`
+	Connected  bool                           `json:"connected"`
+	Components map[string]ComponentStatusType `json:"components"`
+	Timestamp  time.Time                      `json:"timestamp"`
 }
 
 // NewHealthServer creates a new health server
@@ -91,43 +119,37 @@ func (hs *HealthServer) Stop() {
 }
 
 // healthHandler handles the /health endpoint (liveness probe)
+// Returns healthy if the process is alive and Redis is connected
 func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	hs.mu.RLock()
 	defer hs.mu.RUnlock()
 
 	status := HealthStatus{
-		Status:    "ok",
+		Status:    HealthStatusHealthy,
 		Ready:     false,
 		Connected: false,
-		Components: map[string]string{
-			"redis":      "unknown",
-			"datastream": "unknown",
+		Components: map[string]ComponentStatusType{
+			"redis":      ComponentStatusConnected, // Redis is assumed healthy if we got this far (connection tested at startup)
+			"datastream": ComponentStatusUnknown,
 		},
 		Timestamp: time.Now(),
 	}
 
-	// Check datastream connection
+	// Check datastream connection (for informational purposes)
 	if hs.datastreamClient != nil {
 		status.Connected = hs.datastreamClient.IsConnected()
 		status.Ready = hs.datastreamClient.IsReady()
+
 		if status.Connected {
-			status.Components["datastream"] = "connected"
+			status.Components["datastream"] = ComponentStatusConnected
 		} else {
-			status.Components["datastream"] = "disconnected"
+			status.Components["datastream"] = ComponentStatusDisconnected
 		}
 	}
 
-	// Redis is assumed healthy if we got this far (connection tested at startup)
-	status.Components["redis"] = "connected"
-
-	// Overall status
-	if !status.Connected {
-		status.Status = "unhealthy"
-		w.WriteHeader(http.StatusServiceUnavailable)
-	} else {
-		w.WriteHeader(http.StatusOK)
-	}
-
+	// Liveness check: Process is healthy if Redis is working
+	// Datastream connectivity issues don't make the process unhealthy (it can retry)
+	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(status); err != nil {
 		hs.logger.Error(context.Background(), fmt.Sprintf("Failed to encode health status: %v", err))
@@ -135,40 +157,44 @@ func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // readinessHandler handles the /ready endpoint (readiness probe)
+// Returns ready only when connected to datastream and initial data is loaded
 func (hs *HealthServer) readinessHandler(w http.ResponseWriter, r *http.Request) {
 	hs.mu.RLock()
 	defer hs.mu.RUnlock()
 
 	ready := false
+	connected := false
+
 	if hs.datastreamClient != nil {
+		connected = hs.datastreamClient.IsConnected()
 		ready = hs.datastreamClient.IsReady()
 	}
 
 	status := HealthStatus{
-		Status:    "not_ready",
+		Status:    HealthStatusHealthy, // Will be updated based on readiness
 		Ready:     ready,
-		Connected: false,
-		Components: map[string]string{
-			"redis":      "connected",
-			"datastream": "not_ready",
+		Connected: connected,
+		Components: map[string]ComponentStatusType{
+			"redis":      ComponentStatusConnected,
+			"datastream": ComponentStatusNotReady,
 		},
 		Timestamp: time.Now(),
 	}
 
-	if hs.datastreamClient != nil {
-		status.Connected = hs.datastreamClient.IsConnected()
-		if ready {
-			status.Status = "ready"
-			status.Components["datastream"] = "ready"
-			w.WriteHeader(http.StatusOK)
-		} else if status.Connected {
-			status.Components["datastream"] = "connected"
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			status.Components["datastream"] = "disconnected"
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
+	if ready {
+		// Fully ready: connected and initial data loaded
+		status.Status = HealthStatusHealthy
+		status.Components["datastream"] = ComponentStatusReady
+		w.WriteHeader(http.StatusOK)
+	} else if connected {
+		// Connected but still loading initial data
+		status.Status = HealthStatusHealthy // Still healthy, just not ready yet
+		status.Components["datastream"] = ComponentStatusConnectedLoading
+		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
+		// Not connected at all
+		status.Status = HealthStatusHealthy // Health endpoint should still return healthy
+		status.Components["datastream"] = ComponentStatusDisconnected
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
@@ -267,10 +293,10 @@ func main() {
 		log.Fatalf("Redis connection failed: %v", err)
 	}
 
-	logger.Info(context.Background(), "Using Redis cache")
-	companiesCache = NewRedisCache[*rulesengine.Company](redisClient, cacheTTL)
-	usersCache = NewRedisCache[*rulesengine.User](redisClient, cacheTTL)
-	featuresCache = NewRedisCache[*rulesengine.Flag](redisClient, cacheTTL)
+	logger.Info(context.Background(), "Using Redis cache with batch support")
+	companiesCache = NewRedisBatchCache[*rulesengine.Company](redisClient, cacheTTL)
+	usersCache = NewRedisBatchCache[*rulesengine.User](redisClient, cacheTTL)
+	featuresCache = NewRedisBatchCache[*rulesengine.Flag](redisClient, cacheTTL)
 
 	// Initialize cache cleanup manager (only if cleanup is enabled)
 	var cacheCleanupManager *CacheCleanupManager
@@ -296,20 +322,88 @@ func main() {
 	// Initialize datastream WebSocket client (will be configured later)
 	var datastreamClient *schematicdatastreamws.Client
 
-	// Create message handler with caching
-	messageHandler := NewReplicatorMessageHandler(logger, companiesCache, usersCache, featuresCache, cacheTTL)
+	// Get async configuration from environment or use defaults
+	asyncConfig := DefaultAsyncConfig()
+
+	// Auto-detect or configure number of workers
+	if numWorkersStr := os.Getenv("NUM_WORKERS"); numWorkersStr != "" {
+		if numWorkers, err := strconv.Atoi(numWorkersStr); err == nil && numWorkers > 0 {
+			asyncConfig.NumWorkers = numWorkers
+		}
+	}
+
+	// If still 0 (default), auto-detect based on CPU cores with reasonable bounds
+	if asyncConfig.NumWorkers == 0 {
+		numCPU := runtime.NumCPU()
+		workers := numCPU
+		if workers < 2 {
+			workers = 2 // Minimum for small systems
+		}
+		if workers > 16 {
+			workers = 16 // Cap for large systems to avoid resource exhaustion
+		}
+		asyncConfig.NumWorkers = workers
+	}
+
+	if batchSizeStr := os.Getenv("BATCH_SIZE"); batchSizeStr != "" {
+		if batchSize, err := strconv.Atoi(batchSizeStr); err == nil && batchSize > 0 {
+			asyncConfig.BatchSize = batchSize
+		}
+	}
+
+	if batchTimeoutStr := os.Getenv("BATCH_TIMEOUT"); batchTimeoutStr != "" {
+		if batchTimeout, err := time.ParseDuration(batchTimeoutStr); err == nil {
+			asyncConfig.BatchTimeout = batchTimeout
+		}
+	}
+
+	// Channel size configuration for memory management
+	if companyChanSizeStr := os.Getenv("COMPANY_CHANNEL_SIZE"); companyChanSizeStr != "" {
+		if size, err := strconv.Atoi(companyChanSizeStr); err == nil && size > 0 {
+			asyncConfig.CompanyChannelSize = size
+		}
+	}
+
+	if userChanSizeStr := os.Getenv("USER_CHANNEL_SIZE"); userChanSizeStr != "" {
+		if size, err := strconv.Atoi(userChanSizeStr); err == nil && size > 0 {
+			asyncConfig.UserChannelSize = size
+		}
+	}
+
+	if flagsChanSizeStr := os.Getenv("FLAGS_CHANNEL_SIZE"); flagsChanSizeStr != "" {
+		if size, err := strconv.Atoi(flagsChanSizeStr); err == nil && size > 0 {
+			asyncConfig.FlagsChannelSize = size
+		}
+	}
+
+	// Circuit breaker configuration for customer environment resilience
+	if cbThresholdStr := os.Getenv("CIRCUIT_BREAKER_THRESHOLD"); cbThresholdStr != "" {
+		if threshold, err := strconv.Atoi(cbThresholdStr); err == nil && threshold > 0 {
+			asyncConfig.CircuitBreakerThreshold = threshold
+		}
+	}
+
+	if cbTimeoutStr := os.Getenv("CIRCUIT_BREAKER_TIMEOUT"); cbTimeoutStr != "" {
+		if timeout, err := time.ParseDuration(cbTimeoutStr); err == nil {
+			asyncConfig.CircuitBreakerTimeout = timeout
+		}
+	}
+
+	logger.Info(context.Background(), fmt.Sprintf("Async processing config: workers=%d, batch_size=%d, batch_timeout=%v, channels=[company:%d, user:%d, flags:%d], circuit_breaker=[threshold:%d, timeout:%v]",
+		asyncConfig.NumWorkers, asyncConfig.BatchSize, asyncConfig.BatchTimeout,
+		asyncConfig.CompanyChannelSize, asyncConfig.UserChannelSize, asyncConfig.FlagsChannelSize,
+		asyncConfig.CircuitBreakerThreshold, asyncConfig.CircuitBreakerTimeout))
+
+	// Create async message handler with caching and batching
+	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, logger, cacheTTL, asyncConfig)
 
 	// Create connection ready handler (wsClient will be set later)
 	connectionReadyHandler := NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, logger, cacheTTL)
 
-	// Set up headers with API key
-	headers := http.Header{}
-	headers.Set("X-Schematic-Api-Key", apiKey)
-
 	// Configure the WebSocket client
 	wsOptions := schematicdatastreamws.ClientOptions{
 		URL:                    datastreamURL,
-		Headers:                headers,
+		ApiKey:                 apiKey,
 		MessageHandler:         messageHandler.HandleMessage,
 		ConnectionReadyHandler: connectionReadyHandler.OnConnectionReady,
 		Logger:                 logger,
@@ -350,6 +444,24 @@ func main() {
 		}
 	}()
 
+	// Monitor async handler metrics
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				processed, dropped := messageHandler.GetMetrics()
+				if processed > 0 || dropped > 0 {
+					logger.Info(context.Background(), fmt.Sprintf("Message metrics: processed=%d, dropped=%d", processed, dropped))
+				}
+			case <-sigChan:
+				return
+			}
+		}
+	}()
+
 	// Wait for shutdown signal
 	<-sigChan
 	logger.Info(context.Background(), "Received shutdown signal, closing connection...")
@@ -358,6 +470,16 @@ func main() {
 	if cacheCleanupManager != nil {
 		cacheCleanupManager.Stop()
 		logger.Info(context.Background(), "Cache cleanup manager stopped")
+	}
+
+	// Stop async message handler
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	if err := messageHandler.Shutdown(shutdownCtx); err != nil {
+		logger.Error(context.Background(), fmt.Sprintf("Error shutting down async handler: %v", err))
+	} else {
+		logger.Info(context.Background(), "Async message handler stopped")
 	}
 
 	// Stop health server

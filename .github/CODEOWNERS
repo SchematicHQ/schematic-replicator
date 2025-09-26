@@ -1,0 +1,3 @@
+* @SchematicHQ/devtools
+.github/ @SchematicHQ/infra
+deployments/ @SchematicHQ/infra

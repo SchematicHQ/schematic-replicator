@@ -37,6 +37,13 @@ type CacheProvider[T any] interface {
 	DeleteByPattern(ctx context.Context, pattern string) (int, error)
 }
 
+// BatchCacheProvider extends CacheProvider with batch operations for better performance
+type BatchCacheProvider[T any] interface {
+	CacheProvider[T]
+	BatchSet(ctx context.Context, items map[string]T, ttl time.Duration) error
+	BatchDelete(ctx context.Context, keys []string) error
+}
+
 // redisCache is a Redis implementation of CacheProvider
 type redisCache[T any] struct {
 	client redis.Cmdable
@@ -45,6 +52,14 @@ type redisCache[T any] struct {
 
 // NewRedisCache creates a new Redis cache provider
 func NewRedisCache[T any](client redis.Cmdable, ttl time.Duration) CacheProvider[T] {
+	return &redisCache[T]{
+		client: client,
+		ttl:    ttl,
+	}
+}
+
+// NewRedisBatchCache creates a new Redis cache provider that implements BatchCacheProvider
+func NewRedisBatchCache[T any](client redis.Cmdable, ttl time.Duration) BatchCacheProvider[T] {
 	return &redisCache[T]{
 		client: client,
 		ttl:    ttl,
@@ -179,6 +194,55 @@ func (r *redisCache[T]) DeleteByPattern(ctx context.Context, pattern string) (in
 	return len(allKeys), nil
 }
 
+// BatchSet implements BatchCacheProvider by using Redis pipelining for better performance
+func (r *redisCache[T]) BatchSet(ctx context.Context, items map[string]T, ttl time.Duration) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	pipe := r.client.Pipeline()
+
+	for key, value := range items {
+		jsonData, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("failed to marshal value for key %s: %w", key, err)
+		}
+
+		if ttl > 0 {
+			pipe.SetEx(ctx, key, jsonData, ttl)
+		} else {
+			pipe.Set(ctx, key, jsonData, 0)
+		}
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to execute batch set: %w", err)
+	}
+
+	return nil
+}
+
+// BatchDelete implements BatchCacheProvider by using Redis pipelining for better performance
+func (r *redisCache[T]) BatchDelete(ctx context.Context, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	pipe := r.client.Pipeline()
+
+	for _, key := range keys {
+		pipe.Del(ctx, key)
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to execute batch delete: %w", err)
+	}
+
+	return nil
+}
+
 // CacheCleanupManager handles periodic cleanup of stale cache entries
 type CacheCleanupManager struct {
 	flagsCache     CacheProvider[*rulesengine.Flag]
@@ -267,7 +331,7 @@ func (c *CacheCleanupManager) cleanupStaleEntries(ctx context.Context) error {
 		stalePattern := fmt.Sprintf("%s:%s:*", cacheKeyPrefix, p.name)
 
 		// Clean up stale entries for this cache type
-		deletedCount, err := c.deleteStaleKeysForCache(ctx, p.name, stalePattern, currentVersion)
+		deletedCount, err := c.deleteStaleKeysForCache(ctx, stalePattern, currentVersion)
 
 		if err != nil {
 			c.logger.Error(ctx, fmt.Sprintf("Failed to cleanup %s cache: %v", p.name, err))
@@ -292,7 +356,6 @@ func (c *CacheCleanupManager) cleanupStaleEntries(ctx context.Context) error {
 // deleteStaleKeysForCache deletes stale keys for different cache types
 func (c *CacheCleanupManager) deleteStaleKeysForCache(
 	ctx context.Context,
-	cacheType string,
 	pattern string,
 	currentVersion string,
 ) (int, error) {

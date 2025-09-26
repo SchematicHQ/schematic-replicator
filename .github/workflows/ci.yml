@@ -1,0 +1,32 @@
+name: ci
+
+on: [push]
+
+jobs:
+  compile:
+    runs-on: runs-on=${{ github.run_id }}/runner=1cpu-linux-arm64
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Set up go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Compile
+        run: go build ./...
+
+  test:
+    runs-on: runs-on=${{ github.run_id }}/runner=1cpu-linux-arm64
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Set up go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Test
+        run: go test ./...
