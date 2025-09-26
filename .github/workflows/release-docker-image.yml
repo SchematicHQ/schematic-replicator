@@ -66,7 +66,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # Enable built-in attestations (provenance and SBOM)
-          provenance: true
+          provenance: mode=max
           sbom: true
           # QEMU optimization: Use native cross-compilation instead of emulation
           build-args: |
