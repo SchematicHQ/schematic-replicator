@@ -1,13 +1,14 @@
-# Multi-stage Dockerfile for schematic-datastream-replicator
-# Build with: docker build -f deployments/Dockerfile -t schematic-datastream-replicator .
+# Single-architecture Dockerfile fallback
+# Use this if multi-arch builds with QEMU continue to cause issues
+# Build with: docker build -f deployments/Dockerfile.single-arch -t schematic-datastream-replicator .
 
 # Build args for version information (provided by CI/CD)
 ARG BUILDTIME
 ARG VERSION
 ARG REVISION
 
-# Build stage
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+# Build stage - native architecture only
+FROM golang:1.25-alpine AS builder
 
 # Install security updates and build dependencies
 RUN apk update && apk add --no-cache \
@@ -24,8 +25,7 @@ WORKDIR /app
 # Copy go mod files first for better layer caching
 COPY go.mod go.sum ./
 
-# Download dependencies
-# Set GOPROXY and disable module sumdb for faster, more reliable builds in QEMU
+# Download dependencies with optimized settings
 ENV GOPROXY=https://proxy.golang.org,direct
 ENV GOSUMDB=sum.golang.org
 RUN go mod download && go mod verify
@@ -33,13 +33,8 @@ RUN go mod download && go mod verify
 # Copy source code
 COPY . .
 
-# Build the application with security flags and version information
-# Use TARGETARCH and TARGETPLATFORM for cross-compilation to avoid QEMU issues
-ARG TARGETARCH
-ARG TARGETOS
-# Disable Go's race detector and set build mode to avoid QEMU conflicts
-ENV GORACE=halt_on_error=1
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
+# Build the application for native architecture only
+RUN CGO_ENABLED=0 GOOS=linux go build \
     -buildmode=exe \
     -ldflags="-w -s -extldflags '-static' -X main.version=${VERSION:-dev} -X main.commit=${REVISION:-unknown} -X main.buildTime=${BUILDTIME:-unknown}" \
     -a -installsuffix cgo \
@@ -54,7 +49,7 @@ ARG BUILDTIME
 ARG VERSION
 ARG REVISION
 
-# Health port configuration (can be overridden at build time)
+# Health port configuration
 ARG HEALTH_PORT=8090
 ENV HEALTH_PORT=${HEALTH_PORT}
 
@@ -70,13 +65,8 @@ USER 65532:65532
 # Set working directory
 WORKDIR /app
 
-# Expose health check port (configurable via HEALTH_PORT build arg)
+# Expose health check port
 EXPOSE ${HEALTH_PORT}
-
-# No built-in health check - let orchestrators handle health checks via HTTP endpoints
-# Health endpoints available at:
-# - GET /health (liveness probe)
-# - GET /ready (readiness probe)
 
 # Set OCI labels for production readiness
 LABEL \
