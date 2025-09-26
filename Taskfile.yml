@@ -155,7 +155,7 @@ tasks:
     deps: [build-docker]
     cmds:
       - echo "Production deployment preparation complete"
-      - echo "Docker image: {{.BINARY_NAME}}:latest"
+      - 'echo "Docker image: {{.BINARY_NAME}}:latest"'
 
   # Composite commands for common workflows
   quick:
