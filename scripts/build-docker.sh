@@ -58,7 +58,7 @@ build_with_local_deps() {
     log "Using parent directory as build context to include local dependencies"
     log "Build context: $(dirname "$(pwd)")"
     
-    # Build the image using parent directory as context
+    # Build the image using current directory as context
     docker build \
         --platform linux/amd64 \
         --tag "$tag" \
@@ -68,7 +68,7 @@ build_with_local_deps() {
         --build-arg VCS_REF="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
         --build-arg HEALTH_PORT="${HEALTH_PORT:-8090}" \
         ${BUILD_ARGS} \
-        ..
+        .
     
     if [ $? -eq 0 ]; then
         log "Image built successfully: $tag"

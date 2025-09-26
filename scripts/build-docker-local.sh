@@ -21,7 +21,7 @@ docker build \
     --build-arg REVISION="$REVISION" \
     --build-arg BUILDTIME="$BUILDTIME" \
     -t schematic-datastream-replicator:local \
-    ../
+    .
 
 echo
 echo "✅ Docker image built successfully!"
