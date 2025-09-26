@@ -15,9 +15,14 @@ jobs:
   # Build and push Docker image
   docker:
     runs-on: runs-on=${{ github.run_id }}/runner=4cpu-linux-arm64
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
     permissions:
       contents: read
       security-events: write
+      id-token: write # For signing and attestations
+      attestations: write # For build provenance
     
     steps:
       - name: Checkout repo
@@ -52,6 +57,7 @@ jobs:
 
       # Production-ready: Build for multiple architectures with QEMU optimizations
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -68,6 +74,14 @@ jobs:
             VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
             REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
 
+      # Generate build provenance attestation
+      - name: Generate build attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
       # Security: Scan the built image
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.33.1
@@ -76,12 +90,14 @@ jobs:
           format: 'table'
           # Output will be shown in the GitHub Actions log
 
-  # Generate SBOM for supply chain security
+  # Generate SBOM and attestation for supply chain security
   sbom:
     needs: [docker]
     runs-on: runs-on=${{ github.run_id }}/runner=1cpu-linux-arm64
     permissions:
       contents: read
+      id-token: write # For signing
+      attestations: write # For SBOM attestations
     
     steps:
       - name: Checkout repo
@@ -93,6 +109,14 @@ jobs:
           path: .
           format: spdx-json
           output-file: sbom.spdx.json
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-name: ${{ needs.docker.outputs.image-name }}
+          subject-digest: ${{ needs.docker.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
 
       - name: Upload SBOM as artifact
         uses: actions/upload-artifact@v4
