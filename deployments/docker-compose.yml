@@ -1,9 +1,9 @@
-# docker-compose.yml for schematic-datastream-replicator
+# docker-compose.yml for schematic-replicator
 # Provides a complete stack with Redis for caching
-# All services are grouped under the 'schematic-datastream' stack
+# All services are grouped under the 'schematic-replicator' stack
 
 # Stack configuration
-name: schematic-datastream
+name: schematic-replicator
 
 services:
   schematic-replicator:
@@ -14,12 +14,12 @@ services:
         - linux/amd64
       args:
         - HEALTH_PORT=${HEALTH_PORT:-8090}
-    image: schematic-datastream-replicator:latest
+    image: schematic-replicator:latest
     container_name: schematic-replicator
     ports:
       - "${HEALTH_PORT:-8090}:${HEALTH_PORT:-8090}"  # Health/API port (configurable)
     labels:
-      - "com.schematic.stack=datastream"
+      - "com.schematic.stack=replicator"
       - "com.schematic.service=replicator"
       - "com.schematic.version=latest"
     environment:
@@ -46,7 +46,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=10m
     networks:
-      - datastream-network
+      - replicator-network
     # External health check - use HTTP endpoints from outside the container
     # For Kubernetes: configure liveness/readiness probes to use /health and /ready endpoints
     # For development: monitor via curl http://localhost:${HEALTH_PORT:-8090}/health
@@ -57,7 +57,7 @@ services:
     ports:
       - "6380:6379"  # Redis port (mapped to 6380 to avoid conflicts)
     labels:
-      - "com.schematic.stack=datastream"
+      - "com.schematic.stack=replicator"
       - "com.schematic.service=redis"
       - "com.schematic.version=7-alpine"
     environment:
@@ -78,7 +78,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=10m
     networks:
-      - datastream-network
+      - replicator-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -87,16 +87,16 @@ services:
       start_period: 5s
 
 networks:
-  datastream-network:
+  replicator-network:
     driver: bridge
-    name: schematic-datastream-network
+    name: schematic-replicator-network
     labels:
-      - "com.schematic.stack=datastream"
+      - "com.schematic.stack=replicator"
 
 volumes:
   redis_data:
     driver: local
-    name: schematic-datastream-redis-data
+    name: schematic-replicator-redis-data
     labels:
-      - "com.schematic.stack=datastream"
+      - "com.schematic.stack=replicator"
       - "com.schematic.service=redis"
