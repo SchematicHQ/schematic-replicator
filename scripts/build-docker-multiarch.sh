@@ -1,11 +1,12 @@
 #!/bin/bash
-# Multi-architecture Docker build script for GitHub Actions
+# Multi-architecture Docker build script for local development and manual builds
 # This script builds the Docker image with proper cross-compilation to avoid QEMU issues
+# Note: Production releases are handled automatically by GitHub Actions
 
 set -euo pipefail
 
 # Default values
-IMAGE_NAME="${IMAGE_NAME:-schematichq/datastream-replicator}"
+IMAGE_NAME="${IMAGE_NAME:-getschematic/schematic-replicator}"
 VERSION="${VERSION:-dev}"
 REVISION="${REVISION:-$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')}"
 BUILDTIME="${BUILDTIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
@@ -13,7 +14,7 @@ PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH="${PUSH:-false}"
 DOCKERFILE="${DOCKERFILE:-deployments/Dockerfile}"
 
-# Build context is parent directory
+# Build context is current directory (where go.mod and go.sum are located)
 BUILD_CONTEXT="${BUILD_CONTEXT:-./}"
 
 echo "Building multi-arch Docker image..."
