@@ -83,7 +83,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@v0.17.2
+        uses: anchore/sbom-action@v0.20.6
         with:
           path: .
           format: spdx-json
