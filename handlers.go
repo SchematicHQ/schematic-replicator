@@ -60,6 +60,8 @@ func (h *ReplicatorMessageHandler) HandleMessage(ctx context.Context, message *s
 	switch message.EntityType {
 	case string(schematicdatastreamws.EntityTypeFlags):
 		return h.handleFlagsMessage(ctx, message)
+	case string(schematicdatastreamws.EntityTypeFlag):
+		return h.handleFlagMessage(ctx, message)
 	case string(schematicdatastreamws.EntityTypeCompany):
 		return h.handleCompanyMessage(ctx, message)
 	case string(schematicdatastreamws.EntityTypeUser):
@@ -146,6 +148,63 @@ func (h *ReplicatorMessageHandler) handleFlagsMessage(ctx context.Context, messa
 			}
 			h.flagsMu.Unlock()
 		}
+	}
+
+	return nil
+}
+
+// handleFlagMessage handles single flag messages (EntityTypeFlag)
+func (h *ReplicatorMessageHandler) handleFlagMessage(ctx context.Context, message *schematicdatastreamws.DataStreamResp) error {
+	switch message.MessageType {
+	case schematicdatastreamws.MessageTypeFull, schematicdatastreamws.MessageTypePartial:
+		// For single flag, we expect a single rulesengine.Flag
+		var flag *rulesengine.Flag
+		if err := json.Unmarshal(message.Data, &flag); err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to unmarshal single flag data: %v", err))
+			return err
+		}
+
+		if flag != nil {
+			// Lock for cache operations (matching schematic-go pattern)
+			h.flagsMu.Lock()
+			cacheKey := flagCacheKey(flag.Key)
+			if err := h.flagsCache.Set(ctx, cacheKey, flag, h.cacheTTL); err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to cache single flag %s: %v", flag.Key, err))
+			} else {
+				h.logger.Debug(ctx, fmt.Sprintf("Cached single flag: %s", flag.Key))
+			}
+			h.flagsMu.Unlock()
+		}
+
+	case schematicdatastreamws.MessageTypeDelete:
+		// For delete, we expect just the flag key or ID
+		var deleteData struct {
+			Key string `json:"key,omitempty"`
+			ID  string `json:"id,omitempty"`
+		}
+		if err := json.Unmarshal(message.Data, &deleteData); err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to unmarshal single flag delete data: %v", err))
+			return err
+		}
+
+		flagKey := deleteData.Key
+		if flagKey == "" {
+			flagKey = deleteData.ID
+		}
+
+		if flagKey != "" {
+			h.flagsMu.Lock()
+			cacheKey := flagCacheKey(flagKey)
+			if err := h.flagsCache.Delete(ctx, cacheKey); err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to delete single flag from cache: %v", err))
+			} else {
+				h.logger.Debug(ctx, fmt.Sprintf("Deleted single flag from cache: %s", flagKey))
+			}
+			h.flagsMu.Unlock()
+		}
+
+	default:
+		h.logger.Debug(ctx, fmt.Sprintf("Unhandled single flag message type: %s", message.MessageType))
 	}
 
 	return nil
