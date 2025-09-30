@@ -714,11 +714,14 @@ func (h *ConnectionReadyHandler) cacheUserForKeys(ctx context.Context, user *rul
 
 func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *rulesengine.Company {
 	company := &rulesengine.Company{
-		ID:            data.ID,
-		AccountID:     "", // Will need to be set from context or configuration
-		EnvironmentID: data.EnvironmentID,
-		Keys:          make(map[string]string),
-		Traits:        make([]*rulesengine.Trait, 0),
+		ID:                data.ID,
+		AccountID:         "", // Not available from API response - would need to be set from context
+		EnvironmentID:     data.EnvironmentID,
+		Keys:              make(map[string]string),
+		Traits:            make([]*rulesengine.Trait, 0),
+		BillingProductIDs: make([]string, 0),
+		PlanIDs:           make([]string, 0),
+		CreditBalances:    make(map[string]float64),
 	}
 
 	// Convert keys - EntityKeyDetailResponseData has Key and Value fields
@@ -744,7 +747,84 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		}
 	}
 
+	// Set BasePlanID from the primary plan (ID is a string, not a pointer)
+	if data.Plan != nil && data.Plan.ID != "" {
+		company.BasePlanID = &data.Plan.ID
+	}
+
+	// Extract BillingProductIDs from billing subscriptions
+	if data.BillingSubscriptions != nil {
+		for _, subscription := range data.BillingSubscriptions {
+			if subscription != nil && subscription.Products != nil {
+				for _, product := range subscription.Products {
+					if product != nil && product.ID != "" {
+						company.BillingProductIDs = append(company.BillingProductIDs, product.ID)
+					}
+				}
+			}
+		}
+	}
+
+	// Also check the primary billing subscription
+	if data.BillingSubscription != nil && data.BillingSubscription.Products != nil {
+		for _, product := range data.BillingSubscription.Products {
+			if product != nil && product.ID != "" {
+				// Avoid duplicates by checking if it's already in the slice
+				found := false
+				for _, existingID := range company.BillingProductIDs {
+					if existingID == product.ID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					company.BillingProductIDs = append(company.BillingProductIDs, product.ID)
+				}
+			}
+		}
+	}
+
+	// Extract PlanIDs from the plans array (ID is a string, not a pointer)
+	if data.Plans != nil {
+		for _, plan := range data.Plans {
+			if plan != nil && plan.ID != "" {
+				company.PlanIDs = append(company.PlanIDs, plan.ID)
+			}
+		}
+	}
+
+	// Convert primary billing subscription to rulesengine.Subscription
+	if data.BillingSubscription != nil {
+		company.Subscription = convertBillingSubscriptionToRulesEngine(data.BillingSubscription)
+	}
+
+	// Set credit balances - BillingCreditBalances is already a map[string]float64
+	if data.BillingCreditBalances != nil {
+		company.CreditBalances = data.BillingCreditBalances
+	}
+
 	return company
+}
+
+// Helper function to convert billing subscription to rulesengine.Subscription
+func convertBillingSubscriptionToRulesEngine(billingSubscription *schematicgo.BillingSubscriptionView) *rulesengine.Subscription {
+	if billingSubscription == nil {
+		return nil
+	}
+
+	subscription := &rulesengine.Subscription{
+		ID: billingSubscription.ID,
+	}
+
+	// Set period start and end (these are int timestamps, convert to time.Time)
+	if billingSubscription.PeriodStart != 0 {
+		subscription.PeriodStart = time.Unix(int64(billingSubscription.PeriodStart), 0)
+	}
+	if billingSubscription.PeriodEnd != 0 {
+		subscription.PeriodEnd = time.Unix(int64(billingSubscription.PeriodEnd), 0)
+	}
+
+	return subscription
 }
 
 func convertToRulesEngineUser(data *schematicgo.UserDetailResponseData) *rulesengine.User {

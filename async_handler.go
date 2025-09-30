@@ -879,8 +879,8 @@ func (h *AsyncReplicatorMessageHandler) processBulkFlagsMessage(ctx context.Cont
 	switch message.MessageType {
 	case schematicdatastreamws.MessageTypeFull:
 		// Handle flags data (array of flags)
-		var flagsData []map[string]interface{}
-		if err := json.Unmarshal(message.Data, &flagsData); err != nil {
+		var flags []*rulesengine.Flag
+		if err := json.Unmarshal(message.Data, &flags); err != nil {
 			return fmt.Errorf("failed to unmarshal flags data: %w", err)
 		}
 
@@ -888,9 +888,8 @@ func (h *AsyncReplicatorMessageHandler) processBulkFlagsMessage(ctx context.Cont
 		defer h.flagsMu.Unlock()
 
 		var cacheKeys []string
-		for _, flagData := range flagsData {
-			flag := convertMapToFlag(flagData)
-			if flag != nil {
+		for _, flag := range flags {
+			if flag != nil && flag.Key != "" {
 				cacheKey := flagCacheKey(flag.Key)
 				if err := h.flagsCache.Set(ctx, cacheKey, flag, h.cacheTTL); err != nil {
 					h.logger.Error(ctx, fmt.Sprintf("Failed to cache flag %s: %v", flag.Key, err))
@@ -920,16 +919,15 @@ func (h *AsyncReplicatorMessageHandler) processSingleFlagMessage(ctx context.Con
 	switch message.MessageType {
 	case schematicdatastreamws.MessageTypeFull, schematicdatastreamws.MessageTypePartial:
 		// Handle single flag data
-		var flagData map[string]interface{}
-		if err := json.Unmarshal(message.Data, &flagData); err != nil {
+		var flag *rulesengine.Flag
+		if err := json.Unmarshal(message.Data, &flag); err != nil {
 			return fmt.Errorf("failed to unmarshal single flag data: %w", err)
 		}
 
 		h.flagsMu.Lock()
 		defer h.flagsMu.Unlock()
 
-		flag := convertMapToFlag(flagData)
-		if flag != nil {
+		if flag != nil && flag.Key != "" {
 			cacheKey := flagCacheKey(flag.Key)
 			if err := h.flagsCache.Set(ctx, cacheKey, flag, h.cacheTTL); err != nil {
 				h.logger.Error(ctx, fmt.Sprintf("Failed to cache flag %s: %v", flag.Key, err))
@@ -970,67 +968,4 @@ func (h *AsyncReplicatorMessageHandler) processSingleFlagMessage(ctx context.Con
 	}
 
 	return nil
-}
-
-// convertMapToFlag converts a map to a rulesengine.Flag
-func convertMapToFlag(data map[string]interface{}) *rulesengine.Flag {
-	flag := &rulesengine.Flag{}
-
-	if id, ok := data["id"].(string); ok {
-		flag.ID = id
-	}
-	if accountID, ok := data["account_id"].(string); ok {
-		flag.AccountID = accountID
-	}
-	if environmentID, ok := data["environment_id"].(string); ok {
-		flag.EnvironmentID = environmentID
-	}
-	if key, ok := data["key"].(string); ok {
-		flag.Key = key
-	}
-	if defaultValue, ok := data["default_value"].(bool); ok {
-		flag.DefaultValue = defaultValue
-	}
-
-	// Convert rules if present
-	if rulesData, ok := data["rules"].([]interface{}); ok {
-		for _, ruleData := range rulesData {
-			if ruleMap, ok := ruleData.(map[string]interface{}); ok {
-				rule := convertMapToRule(ruleMap)
-				if rule != nil {
-					flag.Rules = append(flag.Rules, rule)
-				}
-			}
-		}
-	}
-
-	return flag
-}
-
-// convertMapToRule converts a map to a rulesengine.Rule
-func convertMapToRule(data map[string]interface{}) *rulesengine.Rule {
-	rule := &rulesengine.Rule{}
-
-	if id, ok := data["id"].(string); ok {
-		rule.ID = id
-	}
-	if accountID, ok := data["account_id"].(string); ok {
-		rule.AccountID = accountID
-	}
-	if environmentID, ok := data["environment_id"].(string); ok {
-		rule.EnvironmentID = environmentID
-	}
-	if name, ok := data["name"].(string); ok {
-		rule.Name = name
-	}
-	if priority, ok := data["priority"].(float64); ok {
-		rule.Priority = int64(priority)
-	}
-	if value, ok := data["value"].(bool); ok {
-		rule.Value = value
-	}
-
-	// Add more rule field conversions as needed based on rulesengine.Rule structure
-
-	return rule
 }

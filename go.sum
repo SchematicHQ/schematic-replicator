@@ -26,8 +26,10 @@ github.com/schematichq/rulesengine v0.1.7 h1:BYato4sO51y5ugxPrFojHLtNtV6GVizUoKO
 github.com/schematichq/rulesengine v0.1.7/go.mod h1:HmweBgjg+kVe6VuNMLc7FISHFF0wzr5cVGLAxlVP8+4=
 github.com/schematichq/schematic-datastream-ws v0.2.1 h1:G0T8dkIlKQOQVIuKVZ+KUU3qAwwQW8CEyHouq7iH2gg=
 github.com/schematichq/schematic-datastream-ws v0.2.1/go.mod h1:NKrg326C9YfCDOI84On5GZhvrovzDpFCzW8wdBwPZ3g=
-github.com/schematichq/schematic-go v1.2.2 h1:AxCnLZw8Qp04BPABpeJajAQpywqN4uJ49GPzjBdq3Dk=
-github.com/schematichq/schematic-go v1.2.2/go.mod h1:4xwp/s/oDAr2HU5xDgLR29j3f54PEiaN8FwVJKJuZ6g=
+github.com/schematichq/schematic-go v1.3.2 h1:q5W9XrM7B4g/yrmkgHuoDqWb9pCuVeJNNgl7+f+5S3g=
+github.com/schematichq/schematic-go v1.3.2/go.mod h1:wnn/t6Cw8GJrMlsb1yTWTG2FOOgOi8kBwUT2IV5Lu8Q=
+github.com/stretchr/objx v0.5.2 h1:xuMeJ0Sdp5ZMRXx/aWO6RZxdr3beISkG5/G/aIRr3pY=
+github.com/stretchr/objx v0.5.2/go.mod h1:FRsXN1f5AsAjCGJKqEizvkpNtU+EGNCLh3NxZ/8L+MA=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/yuin/gopher-lua v1.1.1 h1:kYKnWBjvbNP4XLT3+bPEwAXJx262OhaHDWDVOPjL46M=
