@@ -255,7 +255,7 @@ func (h *AsyncReplicatorMessageHandler) HandleMessage(ctx context.Context, messa
 		return h.queueCompanyMessage(ctx, job)
 	case string(schematicdatastreamws.EntityTypeUser):
 		return h.queueUserMessage(ctx, job)
-	case string(schematicdatastreamws.EntityTypeFlags):
+	case string(schematicdatastreamws.EntityTypeFlags), string(schematicdatastreamws.EntityTypeFlag):
 		return h.queueFlagsMessage(ctx, job)
 	case string(schematicdatastreamws.EntityTypeCompanies):
 		// Bulk company subscription confirmation
@@ -662,10 +662,34 @@ func (h *AsyncReplicatorMessageHandler) processBatchedFlagsMessages(ctx context.
 		return
 	}
 
+	// Group jobs by entity type for different processing
+	var bulkFlagsJobs []*MessageJob  // EntityTypeFlags
+	var singleFlagJobs []*MessageJob // EntityTypeFlag
+
 	for _, job := range jobs {
-		if err := h.processSingleFlagsMessage(ctx, job.Message); err != nil {
+		switch job.Message.EntityType {
+		case string(schematicdatastreamws.EntityTypeFlags):
+			bulkFlagsJobs = append(bulkFlagsJobs, job)
+		case string(schematicdatastreamws.EntityTypeFlag):
+			singleFlagJobs = append(singleFlagJobs, job)
+		}
+	}
+
+	// Process bulk flags messages (with missing flag deletion)
+	for _, job := range bulkFlagsJobs {
+		if err := h.processBulkFlagsMessage(ctx, job.Message); err != nil {
 			h.redisCircuitBreaker.RecordFailure()
-			h.logger.Error(ctx, fmt.Sprintf("Failed to process flags message: %v", err))
+			h.logger.Error(ctx, fmt.Sprintf("Failed to process bulk flags message: %v", err))
+		} else {
+			h.redisCircuitBreaker.RecordSuccess()
+		}
+	}
+
+	// Process single flag messages (without missing flag deletion)
+	for _, job := range singleFlagJobs {
+		if err := h.processSingleFlagMessage(ctx, job.Message); err != nil {
+			h.redisCircuitBreaker.RecordFailure()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to process single flag message: %v", err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
 		}
@@ -850,8 +874,8 @@ func (h *AsyncReplicatorMessageHandler) batchDeleteUsers(ctx context.Context, us
 	return nil
 }
 
-// processSingleFlagsMessage processes a single flags message (flags are processed individually)
-func (h *AsyncReplicatorMessageHandler) processSingleFlagsMessage(ctx context.Context, message *schematicdatastreamws.DataStreamResp) error {
+// processBulkFlagsMessage processes bulk flags messages (EntityTypeFlags) with missing flag deletion
+func (h *AsyncReplicatorMessageHandler) processBulkFlagsMessage(ctx context.Context, message *schematicdatastreamws.DataStreamResp) error {
 	switch message.MessageType {
 	case schematicdatastreamws.MessageTypeFull:
 		// Handle flags data (array of flags)
@@ -863,6 +887,7 @@ func (h *AsyncReplicatorMessageHandler) processSingleFlagsMessage(ctx context.Co
 		h.flagsMu.Lock()
 		defer h.flagsMu.Unlock()
 
+		var cacheKeys []string
 		for _, flagData := range flagsData {
 			flag := convertMapToFlag(flagData)
 			if flag != nil {
@@ -871,12 +896,77 @@ func (h *AsyncReplicatorMessageHandler) processSingleFlagsMessage(ctx context.Co
 					h.logger.Error(ctx, fmt.Sprintf("Failed to cache flag %s: %v", flag.Key, err))
 				} else {
 					h.logger.Debug(ctx, fmt.Sprintf("Cached flag: %s", flag.Key))
+					cacheKeys = append(cacheKeys, cacheKey)
 				}
 			}
 		}
 
+		// Delete missing flags for bulk updates (matching schematic-go behavior)
+		if len(cacheKeys) > 0 {
+			if err := h.flagsCache.DeleteMissing(ctx, cacheKeys); err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to delete missing flags: %v", err))
+			}
+		}
+
 	default:
-		h.logger.Debug(ctx, fmt.Sprintf("Unhandled flags message type: %s", message.MessageType))
+		h.logger.Debug(ctx, fmt.Sprintf("Unhandled bulk flags message type: %s", message.MessageType))
+	}
+
+	return nil
+}
+
+// processSingleFlagMessage processes single flag messages (EntityTypeFlag) without missing flag deletion
+func (h *AsyncReplicatorMessageHandler) processSingleFlagMessage(ctx context.Context, message *schematicdatastreamws.DataStreamResp) error {
+	switch message.MessageType {
+	case schematicdatastreamws.MessageTypeFull, schematicdatastreamws.MessageTypePartial:
+		// Handle single flag data
+		var flagData map[string]interface{}
+		if err := json.Unmarshal(message.Data, &flagData); err != nil {
+			return fmt.Errorf("failed to unmarshal single flag data: %w", err)
+		}
+
+		h.flagsMu.Lock()
+		defer h.flagsMu.Unlock()
+
+		flag := convertMapToFlag(flagData)
+		if flag != nil {
+			cacheKey := flagCacheKey(flag.Key)
+			if err := h.flagsCache.Set(ctx, cacheKey, flag, h.cacheTTL); err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to cache flag %s: %v", flag.Key, err))
+			} else {
+				h.logger.Debug(ctx, fmt.Sprintf("Cached single flag: %s", flag.Key))
+			}
+		}
+
+	case schematicdatastreamws.MessageTypeDelete:
+		// Handle single flag deletion
+		var deleteData struct {
+			Key string `json:"key,omitempty"`
+			ID  string `json:"id,omitempty"`
+		}
+		if err := json.Unmarshal(message.Data, &deleteData); err != nil {
+			return fmt.Errorf("failed to unmarshal single flag delete data: %w", err)
+		}
+
+		flagKey := deleteData.Key
+		if flagKey == "" {
+			flagKey = deleteData.ID
+		}
+
+		if flagKey != "" {
+			h.flagsMu.Lock()
+			defer h.flagsMu.Unlock()
+
+			cacheKey := flagCacheKey(flagKey)
+			if err := h.flagsCache.Delete(ctx, cacheKey); err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to delete single flag from cache: %v", err))
+			} else {
+				h.logger.Debug(ctx, fmt.Sprintf("Deleted single flag from cache: %s", flagKey))
+			}
+		}
+
+	default:
+		h.logger.Debug(ctx, fmt.Sprintf("Unhandled single flag message type: %s", message.MessageType))
 	}
 
 	return nil
