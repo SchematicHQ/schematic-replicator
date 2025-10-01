@@ -48,7 +48,8 @@ func (m *MockCacheProvider[T]) DeleteByPattern(ctx context.Context, pattern stri
 }
 
 // Test data helpers
-func createTestCompany() *rulesengine.Company {
+func createTestCompany(t *testing.T) *rulesengine.Company {
+	t.Helper()
 	return &rulesengine.Company{
 		ID:            "company-123",
 		AccountID:     "account-456",
@@ -69,7 +70,8 @@ func createTestCompany() *rulesengine.Company {
 	}
 }
 
-func createTestUser() *rulesengine.User {
+func createTestUser(t *testing.T) *rulesengine.User {
+	t.Helper()
 	return &rulesengine.User{
 		ID:            "user-123",
 		AccountID:     "account-456",
@@ -90,7 +92,8 @@ func createTestUser() *rulesengine.User {
 	}
 }
 
-func createTestFlag() *rulesengine.Flag {
+func createTestFlag(t *testing.T) *rulesengine.Flag {
+	t.Helper()
 	return &rulesengine.Flag{
 		ID:            "flag-123",
 		AccountID:     "account-456",
@@ -120,19 +123,19 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 		{
 			name:        "Handle company creation message",
 			messageType: schematicdatastreamws.MessageTypeFull,
-			company:     createTestCompany(),
+			company:     createTestCompany(t),
 			expectError: false,
 		},
 		{
 			name:        "Handle company update message",
 			messageType: schematicdatastreamws.MessageTypePartial,
-			company:     createTestCompany(),
+			company:     createTestCompany(t),
 			expectError: false,
 		},
 		{
 			name:        "Handle company deletion message",
 			messageType: schematicdatastreamws.MessageTypeDelete,
-			company:     createTestCompany(),
+			company:     createTestCompany(t),
 			expectError: false,
 		},
 	}
@@ -196,6 +199,92 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 	}
 }
 
+func TestReplicatorMessageHandler_HandleUserMessage(t *testing.T) {
+	tests := []struct {
+		name        string
+		messageType schematicdatastreamws.MessageType
+		user        *rulesengine.User
+		expectError bool
+	}{
+		{
+			name:        "Handle user creation message",
+			messageType: schematicdatastreamws.MessageTypeFull,
+			user:        createTestUser(t),
+			expectError: false,
+		},
+		{
+			name:        "Handle user update message",
+			messageType: schematicdatastreamws.MessageTypePartial,
+			user:        createTestUser(t),
+			expectError: false,
+		},
+		{
+			name:        "Handle user deletion message",
+			messageType: schematicdatastreamws.MessageTypeDelete,
+			user:        createTestUser(t),
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create mocks
+			logger := NewSchematicLogger()
+			mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
+			mockUserCache := NewMockCacheProvider[*rulesengine.User]()
+			mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
+
+			// Create handler
+			handler := NewReplicatorMessageHandler(
+				logger,
+				mockCompanyCache,
+				mockUserCache,
+				mockFlagCache,
+				5*time.Minute,
+			)
+
+			// Prepare test data
+			userData, err := json.Marshal(tt.user)
+			assert.NoError(t, err)
+
+			message := &schematicdatastreamws.DataStreamResp{
+				EntityType:  string(schematicdatastreamws.EntityTypeUser),
+				MessageType: tt.messageType,
+				Data:        json.RawMessage(userData),
+			}
+
+			// Setup expectations based on message type
+			if tt.messageType == schematicdatastreamws.MessageTypeDelete {
+				// For delete operations, expect Delete calls for all user keys
+				for key, value := range tt.user.Keys {
+					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+					mockUserCache.On("Delete", mock.Anything, cacheKey).Return(nil)
+				}
+			} else {
+				// For create/update operations, expect Set calls for all user keys
+				for key, value := range tt.user.Keys {
+					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+					mockUserCache.On("Set", mock.Anything, cacheKey, tt.user, 5*time.Minute).Return(nil)
+				}
+			}
+
+			// Execute test
+			ctx := context.Background()
+			err = handler.HandleMessage(ctx, message)
+
+			// Verify results
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			// Verify mock expectations
+			mockUserCache.AssertExpectations(t)
+		})
+	}
+}
+
 func TestReplicatorMessageHandler_HandleFlagMessage(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -206,19 +295,19 @@ func TestReplicatorMessageHandler_HandleFlagMessage(t *testing.T) {
 		{
 			name:        "Handle single flag creation message",
 			messageType: schematicdatastreamws.MessageTypeFull,
-			flag:        createTestFlag(),
+			flag:        createTestFlag(t),
 			expectError: false,
 		},
 		{
 			name:        "Handle single flag update message",
 			messageType: schematicdatastreamws.MessageTypePartial,
-			flag:        createTestFlag(),
+			flag:        createTestFlag(t),
 			expectError: false,
 		},
 		{
 			name:        "Handle single flag deletion message",
 			messageType: schematicdatastreamws.MessageTypeDelete,
-			flag:        createTestFlag(),
+			flag:        createTestFlag(t),
 			expectError: false,
 		},
 	}
@@ -317,7 +406,7 @@ func TestReplicatorMessageHandler_HandleFlagsMessage(t *testing.T) {
 
 		// Prepare test data - multiple flags
 		flags := []*rulesengine.Flag{
-			createTestFlag(),
+			createTestFlag(t),
 			{
 				ID:            "flag-456",
 				AccountID:     "account-456",
@@ -377,7 +466,7 @@ func TestReplicatorMessageHandler_SingleVsBulkFlagProcessing(t *testing.T) {
 		)
 
 		// Single flag message
-		flag := createTestFlag()
+		flag := createTestFlag(t)
 		flagData, err := json.Marshal(flag)
 		assert.NoError(t, err)
 

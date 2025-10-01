@@ -802,7 +802,8 @@ func (h *AsyncReplicatorMessageHandler) batchDeleteCompanies(ctx context.Context
 		return nil
 	}
 
-	var keysToDelete []string
+	// Use a map to deduplicate keys
+	keysMap := make(map[string]bool)
 
 	for _, company := range companies {
 		if company == nil || len(company.Keys) == 0 {
@@ -811,12 +812,18 @@ func (h *AsyncReplicatorMessageHandler) batchDeleteCompanies(ctx context.Context
 
 		for key, value := range company.Keys {
 			cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-			keysToDelete = append(keysToDelete, cacheKey)
+			keysMap[cacheKey] = true
 		}
 	}
 
-	if len(keysToDelete) == 0 {
+	if len(keysMap) == 0 {
 		return nil
+	}
+
+	// Convert map keys to slice
+	keysToDelete := make([]string, 0, len(keysMap))
+	for key := range keysMap {
+		keysToDelete = append(keysToDelete, key)
 	}
 
 	if batchCache, ok := h.companiesCache.(BatchCacheProvider[*rulesengine.Company]); ok {
@@ -841,7 +848,8 @@ func (h *AsyncReplicatorMessageHandler) batchDeleteUsers(ctx context.Context, us
 		return nil
 	}
 
-	var keysToDelete []string
+	// Use a map to deduplicate keys
+	keysMap := make(map[string]bool)
 
 	for _, user := range users {
 		if user == nil || len(user.Keys) == 0 {
@@ -850,12 +858,18 @@ func (h *AsyncReplicatorMessageHandler) batchDeleteUsers(ctx context.Context, us
 
 		for key, value := range user.Keys {
 			cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-			keysToDelete = append(keysToDelete, cacheKey)
+			keysMap[cacheKey] = true
 		}
 	}
 
-	if len(keysToDelete) == 0 {
+	if len(keysMap) == 0 {
 		return nil
+	}
+
+	// Convert map keys to slice
+	keysToDelete := make([]string, 0, len(keysMap))
+	for key := range keysMap {
+		keysToDelete = append(keysToDelete, key)
 	}
 
 	if batchCache, ok := h.usersCache.(BatchCacheProvider[*rulesengine.User]); ok {
