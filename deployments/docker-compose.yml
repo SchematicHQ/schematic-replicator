@@ -28,7 +28,7 @@ services:
       - SCHEMATIC_API_URL=${SCHEMATIC_API_URL:-https://api.schematichq.com}
       
       # Optional configuration
-      - CACHE_TTL=${CACHE_TTL:-5m}
+      - CACHE_TTL=${CACHE_TTL:-0m}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - HEALTH_PORT=${HEALTH_PORT:-8090}
       
