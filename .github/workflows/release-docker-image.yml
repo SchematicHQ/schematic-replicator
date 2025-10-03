@@ -6,20 +6,27 @@ on:
       - 'v*.*.*'
 
 env:
-  # Docker Hub registry configuration
-  REGISTRY: docker.io
-  IMAGE_NAME: getschematic/schematic-replicator
+  # Registry configurations
+  DOCKERHUB_REGISTRY: docker.io
+  DOCKERHUB_IMAGE: getschematic/schematic-replicator
   DOCKERHUB_USERNAME: getschematic
+  ECR_REGISTRY: public.ecr.aws/n5h3a7j9
+  ECR_IMAGE: schematic-replicator
 
 jobs:
-  # Build and push Docker image
-  docker:
+  # Build Docker image once and prepare for multi-registry push
+  build:
     runs-on: runs-on=${{ github.run_id }}/runner=4cpu-linux-arm64
     permissions:
       contents: read
-      security-events: write
       id-token: write # For signing and attestations
       attestations: write # For build provenance
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      metadata: ${{ steps.meta.outputs.json }}
+      tags: ${{ steps.meta.outputs.tags }}
+      dockerhub-image: ${{ steps.set-images.outputs.dockerhub-image }}
+      ecr-image: ${{ steps.set-images.outputs.ecr-image }}
     
     steps:
       - name: Checkout repo
@@ -33,52 +40,164 @@ jobs:
             network=host
           platforms: linux/amd64,linux/arm64
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Set image names for reuse in other jobs
+      - name: Set image names
+        id: set-images
+        run: |
+          echo "dockerhub-image=${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:latest" >> $GITHUB_OUTPUT
+          echo "ecr-image=${{ env.ECR_REGISTRY }}/${{ env.ECR_IMAGE }}:latest" >> $GITHUB_OUTPUT
 
-      # For production readiness: multi-platform builds
+      # Extract metadata for consistent tagging across registries
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_IMAGE }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest
 
-      # Production-ready: Build for multiple architectures with QEMU optimizations
-      - name: Build and push Docker image
+      # Build image once with registry-agnostic cache
+      - name: Build Docker image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./deployments/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: false # Don't push yet, just build and cache
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Enable built-in attestations (provenance and SBOM)
-          provenance: mode=max
-          sbom: true
+          outputs: type=image,name=target,annotation-index.org.opencontainers.image.description=Multi-registry build
           # QEMU optimization: Use native cross-compilation instead of emulation
           build-args: |
             BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
             VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
             REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
 
-      # Security: Scan the built image
-      - name: Run Trivy vulnerability scanner
+  # Push to Docker Hub
+  push-dockerhub:
+    needs: build
+    runs-on: runs-on=${{ github.run_id }}/runner=2cpu-linux-x64
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Extract Docker Hub specific tags
+      - name: Extract Docker Hub metadata
+        id: meta-dockerhub
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      # Push to Docker Hub using cached build
+      - name: Push to Docker Hub
+        uses: docker/build-push-action@v6
+        with:
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-dockerhub.outputs.tags }}
+          labels: ${{ steps.meta-dockerhub.outputs.labels }}
+          cache-from: type=gha
+          # Enable built-in attestations (provenance and SBOM)
+          provenance: mode=max
+          sbom: true
+
+  # Push to AWS ECR Public
+  push-ecr:
+    needs: build
+    runs-on: runs-on=${{ github.run_id }}/runner=2cpu-linux-x64
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1 # ECR Public is only available in us-east-1
+
+      - name: Log in to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      # Extract ECR specific tags
+      - name: Extract ECR metadata
+        id: meta-ecr
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      # Push to ECR using cached build
+      - name: Push to Amazon ECR Public
+        uses: docker/build-push-action@v6
+        with:
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-ecr.outputs.tags }}
+          labels: ${{ steps.meta-ecr.outputs.labels }}
+          cache-from: type=gha
+          # Enable built-in attestations (provenance and SBOM)
+          provenance: mode=max
+          sbom: true
+
+  # Security scan after successful pushes
+  security-scan:
+    needs: [build, push-dockerhub, push-ecr]
+    runs-on: runs-on=${{ github.run_id }}/runner=2cpu-linux-x64
+    permissions:
+      contents: read
+      security-events: write
+    
+    strategy:
+      matrix:
+        registry:
+          - name: "Docker Hub"
+            image: "${{ needs.build.outputs.dockerhub-image }}"
+          - name: "ECR Public"
+            image: "${{ needs.build.outputs.ecr-image }}"
+    
+    steps:
+      # Security: Scan the built images in both registries
+      - name: Run Trivy vulnerability scanner on ${{ matrix.registry.name }}
         uses: aquasecurity/trivy-action@0.33.1
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          image-ref: ${{ matrix.registry.image }}
           format: 'table'
           # Output will be shown in the GitHub Actions log
 
