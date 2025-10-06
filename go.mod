@@ -8,7 +8,7 @@ require (
 	github.com/redis/go-redis/v9 v9.14.0
 	github.com/schematichq/rulesengine v0.1.8
 	github.com/schematichq/schematic-datastream-ws v0.2.1
-	github.com/schematichq/schematic-go v1.3.2
+	github.com/schematichq/schematic-go v1.3.3
 	github.com/stretchr/testify v1.11.1
 )
 
