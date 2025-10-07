@@ -1,3 +1,10 @@
+# Docker Image Release Workflow - Dual Registry (Docker Hub + ECR)
+# 
+# TEMPORARY: Currently configured to allow pushes from any branch for testing
+# PRODUCTION: Remove the 'branches' section to only trigger on tags
+# 
+# This workflow builds once and pushes to both Docker Hub and AWS ECR Public
+
 name: release-docker-image
 
 on:
@@ -91,6 +98,9 @@ jobs:
       attestations: write
     
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -112,11 +122,14 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest
+            type=ref,event=branch,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
 
       # Push to Docker Hub using cached build
       - name: Push to Docker Hub
         uses: docker/build-push-action@v6
         with:
+          context: .
+          file: deployments/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta-dockerhub.outputs.tags }}
@@ -136,6 +149,9 @@ jobs:
       attestations: write
     
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -162,11 +178,14 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest
+            type=ref,event=branch,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
 
       # Push to ECR using cached build
       - name: Push to Amazon ECR Public
         uses: docker/build-push-action@v6
         with:
+          context: .
+          file: deployments/Dockerfile  # Fixed: Correct path to Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta-ecr.outputs.tags }}
