@@ -72,11 +72,12 @@ const (
 
 // HealthStatus represents the health status response
 type HealthStatus struct {
-	Status     HealthStatusType               `json:"status"`
-	Ready      bool                           `json:"ready"`
-	Connected  bool                           `json:"connected"`
-	Components map[string]ComponentStatusType `json:"components"`
-	Timestamp  time.Time                      `json:"timestamp"`
+	Status       HealthStatusType               `json:"status"`
+	Ready        bool                           `json:"ready"`
+	Connected    bool                           `json:"connected"`
+	Components   map[string]ComponentStatusType `json:"components"`
+	CacheVersion string                         `json:"cache_version"`
+	Timestamp    time.Time                      `json:"timestamp"`
 }
 
 // NewHealthServer creates a new health server
@@ -132,7 +133,8 @@ func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 			"redis":      ComponentStatusConnected, // Redis is assumed healthy if we got this far (connection tested at startup)
 			"datastream": ComponentStatusUnknown,
 		},
-		Timestamp: time.Now(),
+		CacheVersion: rulesengine.GetVersionKey(),
+		Timestamp:    time.Now(),
 	}
 
 	// Check datastream connection (for informational purposes)
@@ -178,7 +180,8 @@ func (hs *HealthServer) readinessHandler(w http.ResponseWriter, r *http.Request)
 			"redis":      ComponentStatusConnected,
 			"datastream": ComponentStatusNotReady,
 		},
-		Timestamp: time.Now(),
+		CacheVersion: rulesengine.GetVersionKey(),
+		Timestamp:    time.Now(),
 	}
 
 	if ready {
