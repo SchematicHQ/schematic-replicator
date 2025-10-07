@@ -722,6 +722,8 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		BillingProductIDs: make([]string, 0),
 		PlanIDs:           make([]string, 0),
 		CreditBalances:    make(map[string]float64),
+		Metrics:           make([]*rulesengine.CompanyMetric, 0),
+		Rules:             make([]*rulesengine.Rule, 0),
 	}
 
 	// Convert keys - EntityKeyDetailResponseData has Key and Value fields
@@ -744,6 +746,24 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 				},
 			}
 			company.Traits = append(company.Traits, rulesEngineTrait)
+		}
+	}
+
+	// Convert EntityTraits - structured trait definitions with values
+	if data.EntityTraits != nil {
+		for _, entityTrait := range data.EntityTraits {
+			if entityTrait != nil && entityTrait.Definition != nil {
+				rulesEngineTrait := &rulesengine.Trait{
+					Value: entityTrait.Value, // Already a string
+					TraitDefinition: &rulesengine.TraitDefinition{
+						ID:         entityTrait.Definition.ID,
+						EntityType: rulesengine.EntityTypeCompany,
+						// Note: ComparableType would need to be converted from entityTrait.Definition.TraitType if available
+						// TraitType is a string, would need mapping to typeconvert.ComparableType enum
+					},
+				}
+				company.Traits = append(company.Traits, rulesEngineTrait)
+			}
 		}
 	}
 
@@ -793,6 +813,25 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		}
 	}
 
+	// Extract PlanIDs from AddOns as well
+	if data.AddOns != nil {
+		for _, addon := range data.AddOns {
+			if addon != nil && addon.ID != "" {
+				// Check for duplicates before adding
+				found := false
+				for _, existingID := range company.PlanIDs {
+					if existingID == addon.ID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					company.PlanIDs = append(company.PlanIDs, addon.ID)
+				}
+			}
+		}
+	}
+
 	// Convert primary billing subscription to rulesengine.Subscription
 	if data.BillingSubscription != nil {
 		company.Subscription = convertBillingSubscriptionToRulesEngine(data.BillingSubscription)
@@ -801,6 +840,82 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 	// Set credit balances - BillingCreditBalances is already a map[string]float64
 	if data.BillingCreditBalances != nil {
 		company.CreditBalances = data.BillingCreditBalances
+	}
+
+	// Convert metrics from CompanyEventPeriodMetricsResponseData to CompanyMetric
+	if data.Metrics != nil {
+		for _, metric := range data.Metrics {
+			if metric != nil {
+				companyMetric := &rulesengine.CompanyMetric{
+					AccountID:     metric.AccountID,
+					EnvironmentID: metric.EnvironmentID,
+					CompanyID:     metric.CompanyID,
+					EventSubtype:  metric.EventSubtype,
+					Value:         int64(metric.Value), // Convert int to int64
+					CreatedAt:     metric.CreatedAt,
+					ValidUntil:    metric.ValidUntil,
+				}
+
+				// Convert string period to MetricPeriod enum
+				switch metric.Period {
+				case "current_day":
+					companyMetric.Period = rulesengine.MetricPeriodCurrentDay
+				case "current_month":
+					companyMetric.Period = rulesengine.MetricPeriodCurrentMonth
+				case "all_time":
+					companyMetric.Period = rulesengine.MetricPeriodAllTime
+				default:
+					companyMetric.Period = rulesengine.MetricPeriodAllTime // Default fallback
+				}
+
+				// Convert string month reset to MetricPeriodMonthReset enum
+				switch metric.MonthReset {
+				case "first":
+					companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetFirst
+				case "billing_cycle":
+					companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetBilling
+				default:
+					companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetFirst // Default fallback
+				}
+
+				company.Metrics = append(company.Metrics, companyMetric)
+			}
+		}
+	}
+
+	// Convert rules from the API response
+	if data.Rules != nil {
+		for _, rule := range data.Rules {
+			if rule != nil {
+				rulesEngineRule := &rulesengine.Rule{
+					ID:            rule.ID,
+					AccountID:     rule.AccountID,
+					EnvironmentID: rule.EnvironmentID,
+					Name:          rule.Name,
+					Priority:      int64(rule.Priority), // Convert int to int64
+					Value:         rule.Value,
+					FlagID:        rule.FlagID,
+				}
+
+				// Convert RuleType string to rulesengine.RuleType enum
+				// Only company_override and company_override_usage_exceeded are valid for companies
+				switch rule.RuleType {
+				case "company_override":
+					rulesEngineRule.RuleType = rulesengine.RuleTypeCompanyOverride
+				case "company_override_usage_exceeded":
+					rulesEngineRule.RuleType = rulesengine.RuleTypeCompanyOverrideUsageExceeded
+				default:
+					// Skip rules that are not company-specific rule types
+					continue
+				}
+
+				// Note: Conditions and ConditionGroups conversion is complex and requires
+				// mapping many nested types. For initial loading, we convert basic rule data.
+				// Full condition conversion is typically handled by datastream updates for real-time accuracy.
+
+				company.Rules = append(company.Rules, rulesEngineRule)
+			}
+		}
 	}
 
 	return company
@@ -834,6 +949,7 @@ func convertToRulesEngineUser(data *schematicgo.UserDetailResponseData) *rulesen
 		EnvironmentID: data.EnvironmentID,
 		Keys:          make(map[string]string),
 		Traits:        make([]*rulesengine.Trait, 0),
+		Rules:         make([]*rulesengine.Rule, 0),
 	}
 
 	// Convert keys - EntityKeyDetailResponseData has Key and Value fields
@@ -858,6 +974,28 @@ func convertToRulesEngineUser(data *schematicgo.UserDetailResponseData) *rulesen
 			user.Traits = append(user.Traits, rulesEngineTrait)
 		}
 	}
+
+	// Convert EntityTraits - structured trait definitions with values
+	if data.EntityTraits != nil {
+		for _, entityTrait := range data.EntityTraits {
+			if entityTrait != nil && entityTrait.Definition != nil {
+				rulesEngineTrait := &rulesengine.Trait{
+					Value: entityTrait.Value, // Already a string
+					TraitDefinition: &rulesengine.TraitDefinition{
+						ID:         entityTrait.Definition.ID,
+						EntityType: rulesengine.EntityTypeUser,
+						// Note: ComparableType would need to be converted from entityTrait.Definition.TraitType if available
+						// TraitType is a string, would need mapping to typeconvert.ComparableType enum
+					},
+				}
+				user.Traits = append(user.Traits, rulesEngineTrait)
+			}
+		}
+	}
+
+	// Note: Rules are not available from the UserDetailResponseData
+	// User rules would typically be populated from datastream messages or other API calls
+	// For initial loading, we initialize it as empty and it gets populated via datastream updates
 
 	return user
 }
