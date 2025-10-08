@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/schematichq/rulesengine"
+	"github.com/schematichq/rulesengine/typeconvert"
 	schematicdatastreamws "github.com/schematichq/schematic-datastream-ws"
 	schematicgo "github.com/schematichq/schematic-go"
 	"github.com/schematichq/schematic-go/client"
@@ -668,42 +669,32 @@ func (h *ConnectionReadyHandler) requestFlagsData(ctx context.Context) error {
 	return nil
 }
 
-// Helper methods for ConnectionReadyHandler to cache entities
-
-// Helper method to cache company for all keys (matching schematic-go pattern)
 func (h *ConnectionReadyHandler) cacheCompanyForKeys(ctx context.Context, company *rulesengine.Company) map[string]error {
 	if company == nil || len(company.Keys) == 0 {
 		return nil
 	}
 
-	// Map to track which cache keys were successfully cached and which ones failed
 	cacheResults := make(map[string]error)
 
-	// Try to cache the company for all keys
 	for key, value := range company.Keys {
 		companyKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
 		err := h.companiesCache.Set(ctx, companyKey, company, h.cacheTTL)
-		// Store the result for each cache key
 		cacheResults[companyKey] = err
 	}
 
 	return cacheResults
 }
 
-// Helper method to cache user for all keys (matching schematic-go pattern)
 func (h *ConnectionReadyHandler) cacheUserForKeys(ctx context.Context, user *rulesengine.User) map[string]error {
 	if user == nil || len(user.Keys) == 0 {
 		return nil
 	}
 
-	// Map to track which cache keys were successfully cached and which ones failed
 	cacheResults := make(map[string]error)
 
-	// Try to cache the user for all keys
 	for key, value := range user.Keys {
 		userKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
 		err := h.usersCache.Set(ctx, userKey, user, h.cacheTTL)
-		// Store the result for each cache key
 		cacheResults[userKey] = err
 	}
 
@@ -722,9 +713,10 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		BillingProductIDs: make([]string, 0),
 		PlanIDs:           make([]string, 0),
 		CreditBalances:    make(map[string]float64),
+		Metrics:           make([]*rulesengine.CompanyMetric, 0),
+		Rules:             make([]*rulesengine.Rule, 0),
 	}
 
-	// Convert keys - EntityKeyDetailResponseData has Key and Value fields
 	if data.Keys != nil {
 		for _, keyData := range data.Keys {
 			if keyData != nil {
@@ -733,26 +725,12 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		}
 	}
 
-	// Convert traits - Traits is a map[string]interface{}
-	if data.Traits != nil {
-		for traitName, traitValue := range data.Traits {
-			rulesEngineTrait := &rulesengine.Trait{
-				Value: fmt.Sprintf("%v", traitValue), // Convert interface{} to string
-				TraitDefinition: &rulesengine.TraitDefinition{
-					ID:         traitName, // Use trait name as ID for now
-					EntityType: rulesengine.EntityTypeCompany,
-				},
-			}
-			company.Traits = append(company.Traits, rulesEngineTrait)
-		}
-	}
+	company.Traits = convertCompanyTraits(data)
 
-	// Set BasePlanID from the primary plan (ID is a string, not a pointer)
 	if data.Plan != nil && data.Plan.ID != "" {
 		company.BasePlanID = &data.Plan.ID
 	}
 
-	// Extract BillingProductIDs from billing subscriptions
 	if data.BillingSubscriptions != nil {
 		for _, subscription := range data.BillingSubscriptions {
 			if subscription != nil && subscription.Products != nil {
@@ -765,11 +743,9 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		}
 	}
 
-	// Also check the primary billing subscription
 	if data.BillingSubscription != nil && data.BillingSubscription.Products != nil {
 		for _, product := range data.BillingSubscription.Products {
 			if product != nil && product.ID != "" {
-				// Avoid duplicates by checking if it's already in the slice
 				found := false
 				for _, existingID := range company.BillingProductIDs {
 					if existingID == product.ID {
@@ -784,7 +760,6 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		}
 	}
 
-	// Extract PlanIDs from the plans array (ID is a string, not a pointer)
 	if data.Plans != nil {
 		for _, plan := range data.Plans {
 			if plan != nil && plan.ID != "" {
@@ -793,20 +768,21 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		}
 	}
 
-	// Convert primary billing subscription to rulesengine.Subscription
 	if data.BillingSubscription != nil {
 		company.Subscription = convertBillingSubscriptionToRulesEngine(data.BillingSubscription)
 	}
 
-	// Set credit balances - BillingCreditBalances is already a map[string]float64
 	if data.BillingCreditBalances != nil {
 		company.CreditBalances = data.BillingCreditBalances
 	}
 
+	company.Metrics = convertMetricsToRulesEngine(data.Metrics)
+
+	company.Rules = convertRulesToRulesEngine(data.Rules)
+
 	return company
 }
 
-// Helper function to convert billing subscription to rulesengine.Subscription
 func convertBillingSubscriptionToRulesEngine(billingSubscription *schematicgo.BillingSubscriptionView) *rulesengine.Subscription {
 	if billingSubscription == nil {
 		return nil
@@ -816,7 +792,6 @@ func convertBillingSubscriptionToRulesEngine(billingSubscription *schematicgo.Bi
 		ID: billingSubscription.ID,
 	}
 
-	// Set period start and end (these are int timestamps, convert to time.Time)
 	if billingSubscription.PeriodStart != 0 {
 		subscription.PeriodStart = time.Unix(int64(billingSubscription.PeriodStart), 0)
 	}
@@ -834,9 +809,9 @@ func convertToRulesEngineUser(data *schematicgo.UserDetailResponseData) *rulesen
 		EnvironmentID: data.EnvironmentID,
 		Keys:          make(map[string]string),
 		Traits:        make([]*rulesengine.Trait, 0),
+		Rules:         make([]*rulesengine.Rule, 0),
 	}
 
-	// Convert keys - EntityKeyDetailResponseData has Key and Value fields
 	if data.Keys != nil {
 		for _, keyData := range data.Keys {
 			if keyData != nil {
@@ -845,19 +820,212 @@ func convertToRulesEngineUser(data *schematicgo.UserDetailResponseData) *rulesen
 		}
 	}
 
-	// Convert traits - Traits is a map[string]interface{}
-	if data.Traits != nil {
-		for traitName, traitValue := range data.Traits {
-			rulesEngineTrait := &rulesengine.Trait{
-				Value: fmt.Sprintf("%v", traitValue), // Convert interface{} to string
-				TraitDefinition: &rulesengine.TraitDefinition{
-					ID:         traitName, // Use trait name as ID for now
-					EntityType: rulesengine.EntityTypeUser,
-				},
+	user.Traits = convertUserTraits(data)
+
+	return user
+}
+
+func convertMetricsToRulesEngine(apiMetrics []*schematicgo.CompanyEventPeriodMetricsResponseData) []*rulesengine.CompanyMetric {
+	if apiMetrics == nil {
+		return make([]*rulesengine.CompanyMetric, 0)
+	}
+
+	metrics := make([]*rulesengine.CompanyMetric, 0, len(apiMetrics))
+	for _, metric := range apiMetrics {
+		if metric != nil {
+			companyMetric := &rulesengine.CompanyMetric{
+				AccountID:     metric.AccountID,
+				EnvironmentID: metric.EnvironmentID,
+				CompanyID:     metric.CompanyID,
+				EventSubtype:  metric.EventSubtype,
+				Value:         int64(metric.Value),
+				CreatedAt:     metric.CreatedAt,
+				ValidUntil:    metric.ValidUntil,
 			}
-			user.Traits = append(user.Traits, rulesEngineTrait)
+
+			switch metric.Period {
+			case "current_day":
+				companyMetric.Period = rulesengine.MetricPeriodCurrentDay
+			case "current_month":
+				companyMetric.Period = rulesengine.MetricPeriodCurrentMonth
+			case "all_time":
+				companyMetric.Period = rulesengine.MetricPeriodAllTime
+			default:
+				companyMetric.Period = rulesengine.MetricPeriodAllTime
+			}
+
+			switch metric.MonthReset {
+			case "first":
+				companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetFirst
+			case "billing_cycle":
+				companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetBilling
+			default:
+				companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetFirst
+			}
+
+			metrics = append(metrics, companyMetric)
 		}
 	}
 
-	return user
+	return metrics
+}
+
+func convertRulesToRulesEngine(apiRules []*schematicgo.Rule) []*rulesengine.Rule {
+	if apiRules == nil {
+		return make([]*rulesengine.Rule, 0)
+	}
+
+	rules := make([]*rulesengine.Rule, 0)
+	for _, rule := range apiRules {
+		if rule != nil {
+			rulesEngineRule := &rulesengine.Rule{
+				ID:            rule.ID,
+				EnvironmentID: rule.EnvironmentID,
+				Name:          rule.Name,
+				Priority:      int64(rule.Priority),
+				Value:         rule.Value,
+				FlagID:        rule.FlagID,
+			}
+
+			switch rule.RuleType {
+			case "company_override":
+				rulesEngineRule.RuleType = rulesengine.RuleTypeCompanyOverride
+			case "company_override_usage_exceeded":
+				rulesEngineRule.RuleType = rulesengine.RuleTypeCompanyOverrideUsageExceeded
+			default:
+				continue
+			}
+
+			rulesEngineRule.Conditions = convertToRulesEngineConditions(rule.Conditions)
+			rulesEngineRule.ConditionGroups = convertToRulesEngineConditionGroups(rule.ConditionGroups)
+
+			rules = append(rules, rulesEngineRule)
+		}
+	}
+
+	return rules
+}
+
+func convertToRulesEngineConditions(apiConditions []*schematicgo.Condition) []*rulesengine.Condition {
+	if apiConditions == nil {
+		return make([]*rulesengine.Condition, 0)
+	}
+
+	conditions := make([]*rulesengine.Condition, 0, len(apiConditions))
+	for _, apiCondition := range apiConditions {
+		if apiCondition != nil {
+			condition := &rulesengine.Condition{
+				ID:           apiCondition.ID,
+				EventSubtype: apiCondition.EventSubtype,
+				ResourceIDs:  apiCondition.ResourceIDs,
+			}
+
+			// Convert metric value from *int to *int64
+			if apiCondition.MetricValue != nil {
+				metricValue := int64(*apiCondition.MetricValue)
+				condition.MetricValue = &metricValue
+			}
+
+			// Convert operator string to enum
+			if apiCondition.Operator != "" {
+				condition.Operator = convertToRulesEngineOperator(apiCondition.Operator)
+			}
+
+			conditions = append(conditions, condition)
+		}
+	}
+
+	return conditions
+}
+
+func convertToRulesEngineConditionGroups(apiConditionGroups []*schematicgo.ConditionGroup) []*rulesengine.ConditionGroup {
+	if apiConditionGroups == nil {
+		return make([]*rulesengine.ConditionGroup, 0)
+	}
+
+	conditionGroups := make([]*rulesengine.ConditionGroup, 0, len(apiConditionGroups))
+	for _, apiGroup := range apiConditionGroups {
+		if apiGroup != nil {
+			conditionGroup := &rulesengine.ConditionGroup{}
+			conditionGroup.Conditions = convertToRulesEngineConditions(apiGroup.Conditions)
+			conditionGroups = append(conditionGroups, conditionGroup)
+		}
+	}
+
+	return conditionGroups
+}
+
+func convertToRulesEngineOperator(operator string) typeconvert.ComparableOperator {
+	switch operator {
+	case "eq", "equals":
+		return typeconvert.ComparableOperatorEquals
+	case "ne", "not_equals":
+		return typeconvert.ComparableOperatorNotEquals
+	case "gt", "greater_than":
+		return typeconvert.ComparableOperatorGt
+	case "lt", "less_than":
+		return typeconvert.ComparableOperatorLt
+	case "gte", "greater_than_or_equal":
+		return typeconvert.ComparableOperatorGte
+	case "lte", "less_than_or_equal":
+		return typeconvert.ComparableOperatorLte
+	case "is_empty":
+		return typeconvert.ComparableOperatorIsEmpty
+	case "not_empty":
+		return typeconvert.ComparableOperatorNotEmpty
+	default:
+		return typeconvert.ComparableOperatorEquals
+	}
+}
+
+func convertToRulesEngineTraits(entityTraits []*schematicgo.EntityTraitDetailResponseData, entityType rulesengine.EntityType) []*rulesengine.Trait {
+	if entityTraits == nil {
+		return make([]*rulesengine.Trait, 0)
+	}
+
+	traits := make([]*rulesengine.Trait, 0, len(entityTraits))
+	for _, entityTrait := range entityTraits {
+		if entityTrait != nil && entityTrait.Definition != nil {
+			rulesEngineTrait := &rulesengine.Trait{
+				Value: entityTrait.Value,
+				TraitDefinition: &rulesengine.TraitDefinition{
+					ID:             entityTrait.Definition.ID,
+					EntityType:     entityType,
+					ComparableType: convertTraitTypeToComparableType(entityTrait.Definition.TraitType),
+				},
+			}
+			traits = append(traits, rulesEngineTrait)
+		}
+	}
+
+	return traits
+}
+
+func convertTraitTypeToComparableType(traitType string) typeconvert.ComparableType {
+	switch traitType {
+	case "boolean", "bool":
+		return typeconvert.ComparableTypeBool
+	case "number", "int", "integer":
+		return typeconvert.ComparableTypeInt
+	case "string":
+		return typeconvert.ComparableTypeString
+	case "date":
+		return typeconvert.ComparableTypeDate
+	default:
+		return typeconvert.ComparableTypeString
+	}
+}
+
+func convertCompanyTraits(data *schematicgo.CompanyDetailResponseData) []*rulesengine.Trait {
+	if data == nil {
+		return make([]*rulesengine.Trait, 0)
+	}
+	return convertToRulesEngineTraits(data.EntityTraits, rulesengine.EntityTypeCompany)
+}
+
+func convertUserTraits(data *schematicgo.UserDetailResponseData) []*rulesengine.Trait {
+	if data == nil {
+		return make([]*rulesengine.Trait, 0)
+	}
+	return convertToRulesEngineTraits(data.EntityTraits, rulesengine.EntityTypeUser)
 }
