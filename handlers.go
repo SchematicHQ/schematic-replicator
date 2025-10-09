@@ -915,9 +915,17 @@ func convertToRulesEngineConditions(apiConditions []*schematicgo.Condition) []*r
 	for _, apiCondition := range apiConditions {
 		if apiCondition != nil {
 			condition := &rulesengine.Condition{
-				ID:           apiCondition.ID,
-				EventSubtype: apiCondition.EventSubtype,
-				ResourceIDs:  apiCondition.ResourceIDs,
+				ID:            apiCondition.ID,
+				AccountID:     apiCondition.AccountID,
+				EnvironmentID: apiCondition.EnvironmentID,
+				EventSubtype:  apiCondition.EventSubtype,
+				ResourceIDs:   apiCondition.ResourceIDs,
+				TraitValue:    apiCondition.TraitValue,
+			}
+
+			// Convert condition type string to enum
+			if apiCondition.ConditionType != "" {
+				condition.ConditionType = convertToRulesEngineConditionType(apiCondition.ConditionType)
 			}
 
 			// Convert metric value from *int to *int64
@@ -929,6 +937,36 @@ func convertToRulesEngineConditions(apiConditions []*schematicgo.Condition) []*r
 			// Convert operator string to enum
 			if apiCondition.Operator != "" {
 				condition.Operator = convertToRulesEngineOperator(apiCondition.Operator)
+			}
+
+			// Convert metric period
+			if apiCondition.MetricPeriod != nil {
+				condition.MetricPeriod = convertToRulesEngineMetricPeriod(*apiCondition.MetricPeriod)
+			}
+
+			// Convert metric period month reset
+			if apiCondition.MetricPeriodMonthReset != nil {
+				condition.MetricPeriodMonthReset = convertToRulesEngineMetricPeriodMonthReset(*apiCondition.MetricPeriodMonthReset)
+			}
+
+			// Convert consumption rate
+			if apiCondition.ConsumptionRate != nil {
+				condition.ConsumptionRate = apiCondition.ConsumptionRate
+			}
+
+			// Convert credit ID
+			if apiCondition.CreditID != nil {
+				condition.CreditID = apiCondition.CreditID
+			}
+
+			// Convert trait definition
+			if apiCondition.TraitDefinition != nil {
+				condition.TraitDefinition = convertToRulesEngineTraitDefinition(apiCondition.TraitDefinition)
+			}
+
+			// Convert comparison trait definition
+			if apiCondition.ComparisonTraitDefinition != nil {
+				condition.ComparisonTraitDefinition = convertToRulesEngineTraitDefinition(apiCondition.ComparisonTraitDefinition)
 			}
 
 			conditions = append(conditions, condition)
@@ -1028,4 +1066,70 @@ func convertUserTraits(data *schematicgo.UserDetailResponseData) []*rulesengine.
 		return make([]*rulesengine.Trait, 0)
 	}
 	return convertToRulesEngineTraits(data.EntityTraits, rulesengine.EntityTypeUser)
+}
+
+func convertToRulesEngineConditionType(conditionType string) rulesengine.ConditionType {
+	switch conditionType {
+	case "trait":
+		return rulesengine.ConditionTypeTrait
+	case "company":
+		return rulesengine.ConditionTypeCompany
+	case "user":
+		return rulesengine.ConditionTypeUser
+	case "plan":
+		return rulesengine.ConditionTypePlan
+	case "base_plan":
+		return rulesengine.ConditionTypeBasePlan
+	case "metric":
+		return rulesengine.ConditionTypeMetric
+	case "billing_product":
+		return rulesengine.ConditionTypeBillingProduct
+	case "crm_product":
+		return rulesengine.ConditionTypeCrmProduct
+	case "credit":
+		return rulesengine.ConditionTypeCredit
+	}
+
+	return ""
+}
+
+func convertToRulesEngineMetricPeriod(metricPeriod string) *rulesengine.MetricPeriod {
+	var period rulesengine.MetricPeriod
+	switch metricPeriod {
+	case "all_time":
+		period = rulesengine.MetricPeriodAllTime
+	case "current_month":
+		period = rulesengine.MetricPeriodCurrentMonth
+	case "current_day":
+		period = rulesengine.MetricPeriodCurrentDay
+	case "current_week":
+		period = rulesengine.MetricPeriodCurrentWeek
+	default:
+		period = rulesengine.MetricPeriodAllTime
+	}
+	return &period
+}
+
+func convertToRulesEngineMetricPeriodMonthReset(monthReset string) *rulesengine.MetricPeriodMonthReset {
+	var reset rulesengine.MetricPeriodMonthReset
+	switch monthReset {
+	case "first_of_month":
+		reset = rulesengine.MetricPeriodMonthResetFirst
+	case "billing_cycle":
+		reset = rulesengine.MetricPeriodMonthResetBilling
+	default:
+		reset = rulesengine.MetricPeriodMonthResetFirst
+	}
+	return &reset
+}
+
+func convertToRulesEngineTraitDefinition(apiTraitDef *schematicgo.TraitDefinition) *rulesengine.TraitDefinition {
+	if apiTraitDef == nil {
+		return nil
+	}
+
+	return &rulesengine.TraitDefinition{
+		ID:             apiTraitDef.ID,
+		ComparableType: convertTraitTypeToComparableType(apiTraitDef.ComparableType),
+	}
 }
