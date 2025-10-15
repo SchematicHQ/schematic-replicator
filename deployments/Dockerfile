@@ -46,8 +46,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
     -o schematic-datastream-replicator \
     .
 
-# Runtime stage using distroless for minimal attack surface
-FROM gcr.io/distroless/static-debian12:nonroot
+# Runtime stage using Alpine for minimal attack surface with built-in curl
+FROM alpine:3.18
 
 # Re-declare build args for runtime stage
 ARG BUILDTIME
@@ -58,25 +58,20 @@ ARG REVISION
 ARG HEALTH_PORT=8090
 ENV HEALTH_PORT=${HEALTH_PORT}
 
-# Copy CA certificates for HTTPS requests
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# Install curl and ca-certificates for health checks
+RUN apk add --no-cache curl ca-certificates
 
 # Copy the binary from builder stage
 COPY --from=builder /app/schematic-datastream-replicator /app/schematic-datastream-replicator
 
-# Use non-root user (distroless nonroot user has UID 65532)
-USER 65532:65532
+# Use non-root user (Alpine nobody user has UID 65534)
+USER 65534:65534
 
 # Set working directory
 WORKDIR /app
 
 # Expose health check port (configurable via HEALTH_PORT build arg)
 EXPOSE ${HEALTH_PORT}
-
-# No built-in health check - let orchestrators handle health checks via HTTP endpoints
-# Health endpoints available at:
-# - GET /health (liveness probe)
-# - GET /ready (readiness probe)
 
 # Set OCI labels for production readiness
 LABEL \
