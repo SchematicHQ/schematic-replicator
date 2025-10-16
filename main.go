@@ -397,18 +397,74 @@ func main() {
 		asyncConfig.CompanyChannelSize, asyncConfig.UserChannelSize, asyncConfig.FlagsChannelSize,
 		asyncConfig.CircuitBreakerThreshold, asyncConfig.CircuitBreakerTimeout))
 
+	// Parse async loading configuration
+	useAsyncLoading := false
+	if asyncLoadingStr := os.Getenv("USE_ASYNC_LOADING"); asyncLoadingStr != "" {
+		if asyncLoadingStr == "true" || asyncLoadingStr == "1" {
+			useAsyncLoading = true
+		}
+	}
+
+	// Configure async loader (only if async loading is enabled)
+	var asyncLoaderConfig AsyncLoaderConfig
+	if useAsyncLoading {
+		asyncLoaderConfig = DefaultAsyncLoaderConfig()
+
+		// Parse async loader specific environment variables
+		if pageSize := os.Getenv("ASYNC_LOADER_PAGE_SIZE"); pageSize != "" {
+			if size, err := strconv.Atoi(pageSize); err == nil && size > 0 {
+				asyncLoaderConfig.PageSize = size
+			}
+		}
+		if cbThresholdStr := os.Getenv("ASYNC_LOADER_CIRCUIT_BREAKER_THRESHOLD"); cbThresholdStr != "" {
+			if threshold, err := strconv.Atoi(cbThresholdStr); err == nil && threshold > 0 {
+				asyncLoaderConfig.CircuitBreakerThreshold = threshold
+			}
+		}
+		if cbTimeoutStr := os.Getenv("ASYNC_LOADER_CIRCUIT_BREAKER_TIMEOUT"); cbTimeoutStr != "" {
+			if timeout, err := time.ParseDuration(cbTimeoutStr); err == nil {
+				asyncLoaderConfig.CircuitBreakerTimeout = timeout
+			}
+		}
+		// Concurrent loading settings (always enabled in async mode)
+		if maxConcurrentStr := os.Getenv("ASYNC_LOADER_MAX_CONCURRENT_REQUESTS"); maxConcurrentStr != "" {
+			if maxConcurrent, err := strconv.Atoi(maxConcurrentStr); err == nil && maxConcurrent > 0 {
+				asyncLoaderConfig.MaxConcurrentRequests = maxConcurrent
+			}
+		}
+		if rateLimitStr := os.Getenv("ASYNC_LOADER_RATE_LIMIT_RPS"); rateLimitStr != "" {
+			if rateLimit, err := strconv.Atoi(rateLimitStr); err == nil && rateLimit > 0 {
+				asyncLoaderConfig.RateLimitRPS = rateLimit
+			}
+		}
+	}
+
 	// Create async message handler with caching and batching
 	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, logger, cacheTTL, asyncConfig)
 
 	// Create connection ready handler (wsClient will be set later)
-	connectionReadyHandler := NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, logger, cacheTTL)
+	var connectionReadyHandlerFunc schematicdatastreamws.ConnectionReadyHandlerFunc
+	var syncHandler *ConnectionReadyHandler
+	var asyncHandler *AsyncConnectionReadyHandler
+
+	if useAsyncLoading {
+		logger.Info(context.Background(), fmt.Sprintf("Using async initial loading: page_size=%d, circuit_breaker=[threshold:%d, timeout:%v], concurrency=[max_requests:%d, rate_limit:%d_rps]",
+			asyncLoaderConfig.PageSize, asyncLoaderConfig.CircuitBreakerThreshold, asyncLoaderConfig.CircuitBreakerTimeout,
+			asyncLoaderConfig.MaxConcurrentRequests, asyncLoaderConfig.RateLimitRPS))
+		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, logger, cacheTTL, asyncLoaderConfig)
+		connectionReadyHandlerFunc = asyncHandler.OnConnectionReady
+	} else {
+		logger.Info(context.Background(), "Using synchronous initial loading (default)")
+		syncHandler = NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, logger, cacheTTL)
+		connectionReadyHandlerFunc = syncHandler.OnConnectionReady
+	}
 
 	// Configure the WebSocket client
 	wsOptions := schematicdatastreamws.ClientOptions{
 		URL:                    datastreamURL,
 		ApiKey:                 apiKey,
 		MessageHandler:         messageHandler.HandleMessage,
-		ConnectionReadyHandler: connectionReadyHandler.OnConnectionReady,
+		ConnectionReadyHandler: connectionReadyHandlerFunc,
 		Logger:                 logger,
 		MaxReconnectAttempts:   10,
 		MinReconnectDelay:      1 * time.Second,
@@ -421,7 +477,11 @@ func main() {
 	}
 
 	// Set the WebSocket client in the connection ready handler
-	connectionReadyHandler.SetWebSocketClient(datastreamClient)
+	if asyncHandler != nil {
+		asyncHandler.SetWebSocketClient(datastreamClient)
+	} else if syncHandler != nil {
+		syncHandler.SetWebSocketClient(datastreamClient)
+	}
 
 	// Create and start health server
 	healthServer := NewHealthServer(healthPort, datastreamClient, redisClient, logger)

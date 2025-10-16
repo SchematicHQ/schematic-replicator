@@ -406,7 +406,7 @@ func (h *ReplicatorMessageHandler) handleUsersMessage(ctx context.Context, messa
 	return nil
 }
 
-// ConnectionReadyHandler implements the ConnectionReadyHandler interface
+// ConnectionReadyHandler implements the ConnectionReadyHandler interface for synchronous loading
 type ConnectionReadyHandler struct {
 	schematicClient *client.Client
 	wsClient        *schematicdatastreamws.Client
@@ -417,7 +417,7 @@ type ConnectionReadyHandler struct {
 	cacheTTL        time.Duration
 }
 
-// NewConnectionReadyHandler creates a new connection ready handler
+// NewConnectionReadyHandler creates a new connection ready handler with synchronous loading (default)
 func NewConnectionReadyHandler(
 	schematicClient *client.Client,
 	wsClient *schematicdatastreamws.Client,
@@ -443,29 +443,32 @@ func (h *ConnectionReadyHandler) SetWebSocketClient(wsClient *schematicdatastrea
 	h.wsClient = wsClient
 }
 
-// OnConnectionReady implements the ConnectionReadyHandler interface
+// OnConnectionReady implements the ConnectionReadyHandler interface for synchronous loading
 func (h *ConnectionReadyHandler) OnConnectionReady(ctx context.Context) error {
+	// Synchronous mode: wait for all data to load before completing
+	h.logger.Info(ctx, "Starting synchronous initial data loading")
+
 	// 1. Load companies from Schematic API
 	if err := h.loadAndCacheCompanies(ctx); err != nil {
-		return err
+		return fmt.Errorf("failed to load companies: %w", err)
 	}
 
 	// 2. Load users from Schematic API
 	if err := h.loadAndCacheUsers(ctx); err != nil {
-		return err
+		return fmt.Errorf("failed to load users: %w", err)
 	}
 
 	// 3. Subscribe to company and user updates via websocket
 	if err := h.subscribeToUpdates(ctx); err != nil {
-		return err
+		return fmt.Errorf("failed to subscribe to updates: %w", err)
 	}
 
 	// 4. Request flags data from datastream
 	if err := h.requestFlagsData(ctx); err != nil {
-		return err
+		return fmt.Errorf("failed to request flags data: %w", err)
 	}
 
-	h.logger.Info(ctx, "Connection ready setup completed")
+	h.logger.Info(ctx, "Connection ready setup completed with synchronous loading")
 	return nil
 }
 

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/redis/go-redis/v9"
 	"github.com/schematichq/rulesengine"
 	"github.com/schematichq/schematic-go/core"
@@ -156,7 +155,6 @@ func (r *redisCache[T]) DeleteMissing(ctx context.Context, keys []string) error 
 
 	// Delete the keys in batches
 	if len(keysToDelete) > 0 {
-		spew.Dump(keysToDelete)
 		return r.client.Del(ctx, keysToDelete...).Err()
 	}
 
