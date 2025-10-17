@@ -9,6 +9,8 @@ import (
 
 	"github.com/schematichq/rulesengine"
 	schematicdatastreamws "github.com/schematichq/schematic-datastream-ws"
+	schematicgo "github.com/schematichq/schematic-go"
+	"github.com/schematichq/schematic-go/client"
 )
 
 // CircuitBreakerState represents the state of a circuit breaker
@@ -981,5 +983,873 @@ func (h *AsyncReplicatorMessageHandler) processSingleFlagMessage(ctx context.Con
 		h.logger.Debug(ctx, fmt.Sprintf("Unhandled single flag message type: %s", message.MessageType))
 	}
 
+	return nil
+}
+
+// AsyncInitialLoader provides asynchronous loading of companies and users
+// This allows the connection to be established quickly while data loads in the background
+type AsyncInitialLoader struct {
+	schematicClient *client.Client
+	companiesCache  CacheProvider[*rulesengine.Company]
+	usersCache      CacheProvider[*rulesengine.User]
+	logger          *SchematicLogger
+	cacheTTL        time.Duration
+	config          AsyncLoaderConfig
+
+	// Circuit breaker for API calls
+	apiCircuitBreaker *CircuitBreaker
+
+	// Rate limiter for API calls
+	rateLimiter *RateLimiter
+
+	// Loading state tracking
+	loadingMu          sync.RWMutex
+	companiesLoaded    bool
+	usersLoaded        bool
+	companiesLoadError error
+	usersLoadError     error
+
+	// Completion channels
+	companiesLoadChan chan struct{}
+	usersLoadChan     chan struct{}
+
+	// Metrics
+	companiesLoadTime time.Duration
+	usersLoadTime     time.Duration
+	totalCompanies    int
+	totalUsers        int
+
+	// Concurrency tracking
+	concurrencyLimit chan struct{} // Semaphore for concurrent requests
+}
+
+// RateLimiter provides rate limiting for API calls
+type RateLimiter struct {
+	ticker   *time.Ticker
+	tokens   chan struct{}
+	shutdown chan struct{}
+	mu       sync.Mutex
+}
+
+// NewRateLimiter creates a new rate limiter with the specified requests per second
+func NewRateLimiter(rps int) *RateLimiter {
+	if rps <= 0 {
+		rps = 10 // Default to 10 RPS
+	}
+
+	rl := &RateLimiter{
+		ticker:   time.NewTicker(time.Second / time.Duration(rps)),
+		tokens:   make(chan struct{}, rps),
+		shutdown: make(chan struct{}),
+	}
+
+	// Fill initial tokens
+	for i := 0; i < rps; i++ {
+		select {
+		case rl.tokens <- struct{}{}:
+		default:
+			// Token bucket full, stop filling
+			return rl
+		}
+	}
+
+	// Start token replenishment
+	go rl.run()
+
+	return rl
+}
+
+// Wait blocks until a token is available
+func (rl *RateLimiter) Wait(ctx context.Context) error {
+	select {
+	case <-rl.tokens:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-rl.shutdown:
+		return fmt.Errorf("rate limiter shutdown")
+	}
+}
+
+// Close shuts down the rate limiter
+func (rl *RateLimiter) Close() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	select {
+	case <-rl.shutdown:
+		return // already closed
+	default:
+		close(rl.shutdown)
+		rl.ticker.Stop()
+	}
+}
+
+// run replenishes tokens at the configured rate
+func (rl *RateLimiter) run() {
+	for {
+		select {
+		case <-rl.ticker.C:
+			select {
+			case rl.tokens <- struct{}{}:
+			default:
+				// Token bucket full, skip
+			}
+		case <-rl.shutdown:
+			return
+		}
+	}
+}
+
+// AsyncLoaderConfig holds configuration for the async loader
+type AsyncLoaderConfig struct {
+	CircuitBreakerThreshold int
+	CircuitBreakerTimeout   time.Duration
+	PageSize                int
+	// Concurrency settings
+	MaxConcurrentRequests int // Maximum concurrent API requests (default: 5)
+	RateLimitRPS          int // Rate limit in requests per second (default: 10)
+}
+
+// DefaultAsyncLoaderConfig returns sensible defaults for async loading
+func DefaultAsyncLoaderConfig() AsyncLoaderConfig {
+	return AsyncLoaderConfig{
+		CircuitBreakerThreshold: 5,                // Allow more failures for initial loading
+		CircuitBreakerTimeout:   30 * time.Second, // Longer timeout for recovery
+		PageSize:                100,              // Standard page size
+		MaxConcurrentRequests:   5,                // Conservative concurrency for rate limiting
+		RateLimitRPS:            10,               // Conservative rate limit
+	}
+}
+
+// NewAsyncInitialLoader creates a new async initial loader
+func NewAsyncInitialLoader(
+	schematicClient *client.Client,
+	companiesCache CacheProvider[*rulesengine.Company],
+	usersCache CacheProvider[*rulesengine.User],
+	logger *SchematicLogger,
+	cacheTTL time.Duration,
+	config AsyncLoaderConfig,
+) *AsyncInitialLoader {
+	return &AsyncInitialLoader{
+		schematicClient:   schematicClient,
+		companiesCache:    companiesCache,
+		usersCache:        usersCache,
+		logger:            logger,
+		cacheTTL:          cacheTTL,
+		config:            config,
+		apiCircuitBreaker: NewCircuitBreaker(config.CircuitBreakerThreshold, config.CircuitBreakerTimeout),
+		rateLimiter:       NewRateLimiter(config.RateLimitRPS),
+		companiesLoadChan: make(chan struct{}),
+		usersLoadChan:     make(chan struct{}),
+		concurrencyLimit:  make(chan struct{}, config.MaxConcurrentRequests),
+	}
+}
+
+// StartAsyncLoading begins loading companies and users asynchronously
+// Returns immediately, allowing the connection to be established without waiting
+func (al *AsyncInitialLoader) StartAsyncLoading(ctx context.Context) {
+	al.logger.Info(ctx, "Starting asynchronous initial data loading")
+
+	// Start companies loading in background
+	go func() {
+		defer close(al.companiesLoadChan)
+
+		startTime := time.Now()
+		err := al.loadCompaniesAsync(ctx)
+		loadTime := time.Since(startTime)
+
+		al.loadingMu.Lock()
+		al.companiesLoaded = true
+		al.companiesLoadError = err
+		al.companiesLoadTime = loadTime
+		al.loadingMu.Unlock()
+
+		if err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Async companies loading failed after %v: %v", loadTime, err))
+		} else {
+			al.logger.Info(ctx, fmt.Sprintf("Async companies loading completed successfully in %v (%d companies)", loadTime, al.totalCompanies))
+		}
+	}()
+
+	// Start users loading in background
+	go func() {
+		defer close(al.usersLoadChan)
+
+		startTime := time.Now()
+		err := al.loadUsersAsync(ctx)
+		loadTime := time.Since(startTime)
+
+		al.loadingMu.Lock()
+		al.usersLoaded = true
+		al.usersLoadError = err
+		al.usersLoadTime = loadTime
+		al.loadingMu.Unlock()
+
+		if err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Async users loading failed after %v: %v", loadTime, err))
+		} else {
+			al.logger.Info(ctx, fmt.Sprintf("Async users loading completed successfully in %v (%d users)", loadTime, al.totalUsers))
+		}
+	}()
+
+	al.logger.Info(ctx, "Async initial data loading started in background")
+}
+
+// WaitForCompletion waits for both companies and users to finish loading
+func (al *AsyncInitialLoader) WaitForCompletion(ctx context.Context) error {
+	al.logger.Info(ctx, "Waiting for async initial data loading to complete")
+
+	// Wait for both to complete or context timeout
+	select {
+	case <-al.companiesLoadChan:
+		// Companies done, wait for users
+		select {
+		case <-al.usersLoadChan:
+			// Both done
+		case <-ctx.Done():
+			return fmt.Errorf("context timeout waiting for users loading: %w", ctx.Err())
+		}
+	case <-al.usersLoadChan:
+		// Users done, wait for companies
+		select {
+		case <-al.companiesLoadChan:
+			// Both done
+		case <-ctx.Done():
+			return fmt.Errorf("context timeout waiting for companies loading: %w", ctx.Err())
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("context timeout waiting for initial loading: %w", ctx.Err())
+	}
+
+	// Clean up resources
+	if al.rateLimiter != nil {
+		al.rateLimiter.Close()
+	}
+
+	// Check for errors
+	al.loadingMu.RLock()
+	defer al.loadingMu.RUnlock()
+
+	if al.companiesLoadError != nil && al.usersLoadError != nil {
+		return fmt.Errorf("both companies and users loading failed: companies=%v, users=%v",
+			al.companiesLoadError, al.usersLoadError)
+	} else if al.companiesLoadError != nil {
+		return fmt.Errorf("companies loading failed: %w", al.companiesLoadError)
+	} else if al.usersLoadError != nil {
+		return fmt.Errorf("users loading failed: %w", al.usersLoadError)
+	}
+
+	al.logger.Info(ctx, fmt.Sprintf("Async initial data loading completed successfully: %d companies in %v, %d users in %v",
+		al.totalCompanies, al.companiesLoadTime, al.totalUsers, al.usersLoadTime))
+
+	return nil
+}
+
+// GetLoadingStatus returns the current loading status
+func (al *AsyncInitialLoader) GetLoadingStatus() (companiesLoaded, usersLoaded bool, companiesErr, usersErr error) {
+	al.loadingMu.RLock()
+	defer al.loadingMu.RUnlock()
+
+	return al.companiesLoaded, al.usersLoaded, al.companiesLoadError, al.usersLoadError
+}
+
+// GetLoadingMetrics returns loading performance metrics
+func (al *AsyncInitialLoader) GetLoadingMetrics() (companiesTime, usersTime time.Duration, totalCompanies, totalUsers int) {
+	al.loadingMu.RLock()
+	defer al.loadingMu.RUnlock()
+
+	return al.companiesLoadTime, al.usersLoadTime, al.totalCompanies, al.totalUsers
+}
+
+// loadCompaniesAsync loads all companies with concurrent requests and rate limiting
+func (al *AsyncInitialLoader) loadCompaniesAsync(ctx context.Context) error {
+	al.logger.Info(ctx, "Starting async companies loading")
+
+	if !al.apiCircuitBreaker.CanExecute() {
+		err := fmt.Errorf("companies loading blocked by circuit breaker")
+		al.apiCircuitBreaker.RecordFailure()
+		return err
+	}
+
+	// Always use concurrent loading in async mode
+	return al.loadCompaniesConcurrent(ctx)
+}
+
+// loadCompaniesConcurrent loads companies using concurrent API requests
+func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error {
+	// First, get the total count to plan pagination
+	countResp, err := al.schematicClient.Companies.CountCompanies(ctx, &schematicgo.CountCompaniesRequest{})
+	if err != nil {
+		al.logger.Error(ctx, fmt.Sprintf("Failed to get companies count: %v", err))
+		al.apiCircuitBreaker.RecordFailure()
+		return err
+	}
+
+	totalCount := 0
+	if countResp.Data != nil && countResp.Data.Count != nil {
+		totalCount = int(*countResp.Data.Count)
+	}
+	al.logger.Info(ctx, fmt.Sprintf("Planning to load %d companies concurrently", totalCount))
+
+	if totalCount == 0 {
+		al.logger.Info(ctx, "No companies to load")
+		return nil
+	}
+
+	pageSize := al.config.PageSize
+	numPages := (totalCount + pageSize - 1) / pageSize
+
+	// Create channels for coordinating concurrent requests
+	type pageResult struct {
+		offset int
+		data   []*schematicgo.CompanyDetailResponseData
+		err    error
+	}
+
+	results := make(chan pageResult, numPages)
+
+	// Start concurrent page fetchers
+	var wg sync.WaitGroup
+	for i := 0; i < numPages; i++ {
+		wg.Add(1)
+		go func(pageIndex int) {
+			defer wg.Done()
+
+			offset := pageIndex * pageSize
+
+			// Rate limiting and concurrency control
+			select {
+			case al.concurrencyLimit <- struct{}{}:
+				defer func() { <-al.concurrencyLimit }()
+			case <-ctx.Done():
+				results <- pageResult{offset: offset, err: ctx.Err()}
+				return
+			}
+
+			if err := al.rateLimiter.Wait(ctx); err != nil {
+				results <- pageResult{offset: offset, err: err}
+				return
+			}
+
+			// Circuit breaker check
+			if !al.apiCircuitBreaker.CanExecute() {
+				results <- pageResult{offset: offset, err: fmt.Errorf("circuit breaker open")}
+				return
+			}
+
+			// Fetch the page
+			companiesResp, err := al.schematicClient.Companies.ListCompanies(ctx, &schematicgo.ListCompaniesRequest{
+				Limit:  &pageSize,
+				Offset: &offset,
+			})
+
+			if err != nil {
+				al.apiCircuitBreaker.RecordFailure()
+				results <- pageResult{offset: offset, err: err}
+				return
+			}
+
+			al.apiCircuitBreaker.RecordSuccess()
+			results <- pageResult{offset: offset, data: companiesResp.Data}
+		}(i)
+	}
+
+	// Wait for all requests to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Process results and cache companies
+	var allCacheKeys []string
+	processedCount := 0
+
+	for result := range results {
+		if result.err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to fetch companies page at offset %d: %v", result.offset, result.err))
+			continue
+		}
+
+		for _, companyData := range result.data {
+			company := convertToRulesEngineCompany(companyData)
+
+			cacheResults := al.cacheCompanyForKeys(ctx, company)
+			for cacheKey, cacheErr := range cacheResults {
+				if cacheErr != nil {
+					al.logger.Error(ctx, fmt.Sprintf("Cache error for company %s key '%s': %v", company.ID, cacheKey, cacheErr))
+				} else {
+					allCacheKeys = append(allCacheKeys, cacheKey)
+				}
+			}
+		}
+
+		processedCount += len(result.data)
+		al.logger.Debug(ctx, fmt.Sprintf("Processed companies page at offset %d (%d companies)", result.offset, len(result.data)))
+	}
+
+	// Evict missing keys
+	if len(allCacheKeys) > 0 {
+		if err := al.companiesCache.DeleteMissing(ctx, allCacheKeys); err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company cache keys: %v", err))
+		}
+	}
+
+	al.totalCompanies = processedCount
+	al.logger.Info(ctx, fmt.Sprintf("Successfully cached %d companies via concurrent async loading", processedCount))
+	return nil
+}
+
+// loadCompaniesSequential loads companies sequentially (fallback method)
+func (al *AsyncInitialLoader) loadCompaniesSequential(ctx context.Context) error {
+	pageSize := al.config.PageSize
+	offset := 0
+	totalCompanies := 0
+	var allCacheKeys []string
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("companies loading cancelled: %w", ctx.Err())
+		default:
+		}
+
+		// Rate limiting
+		if err := al.rateLimiter.Wait(ctx); err != nil {
+			return err
+		}
+
+		// Circuit breaker check
+		if !al.apiCircuitBreaker.CanExecute() {
+			err := fmt.Errorf("companies loading blocked by circuit breaker")
+			al.apiCircuitBreaker.RecordFailure()
+			return err
+		}
+
+		companiesResp, err := al.schematicClient.Companies.ListCompanies(ctx, &schematicgo.ListCompaniesRequest{
+			Limit:  &pageSize,
+			Offset: &offset,
+		})
+		if err != nil {
+			al.apiCircuitBreaker.RecordFailure()
+			return err
+		}
+
+		al.apiCircuitBreaker.RecordSuccess()
+
+		// Convert and cache companies
+		for _, companyData := range companiesResp.Data {
+			company := convertToRulesEngineCompany(companyData)
+
+			cacheResults := al.cacheCompanyForKeys(ctx, company)
+			for cacheKey, cacheErr := range cacheResults {
+				if cacheErr != nil {
+					al.logger.Error(ctx, fmt.Sprintf("Cache error for company %s key '%s': %v", company.ID, cacheKey, cacheErr))
+				} else {
+					allCacheKeys = append(allCacheKeys, cacheKey)
+				}
+			}
+		}
+
+		totalCompanies += len(companiesResp.Data)
+
+		// Check if we reached the end
+		if len(companiesResp.Data) < pageSize {
+			break
+		}
+
+		offset += pageSize
+	}
+
+	// Evict missing keys
+	if len(allCacheKeys) > 0 {
+		if err := al.companiesCache.DeleteMissing(ctx, allCacheKeys); err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company cache keys: %v", err))
+		}
+	}
+
+	al.totalCompanies = totalCompanies
+	al.logger.Info(ctx, fmt.Sprintf("Successfully cached %d companies via sequential async loading", totalCompanies))
+	return nil
+}
+
+// loadUsersAsync loads all users with concurrent requests and rate limiting
+func (al *AsyncInitialLoader) loadUsersAsync(ctx context.Context) error {
+	al.logger.Info(ctx, "Starting async users loading")
+
+	if !al.apiCircuitBreaker.CanExecute() {
+		err := fmt.Errorf("users loading blocked by circuit breaker")
+		al.apiCircuitBreaker.RecordFailure()
+		return err
+	}
+
+	// Always use concurrent loading in async mode
+	return al.loadUsersConcurrent(ctx)
+}
+
+// loadUsersConcurrent loads users using concurrent API requests
+func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
+	// First, get the total count to plan pagination
+	countResp, err := al.schematicClient.Companies.CountUsers(ctx, &schematicgo.CountUsersRequest{})
+	if err != nil {
+		al.logger.Error(ctx, fmt.Sprintf("Failed to get users count: %v", err))
+		al.apiCircuitBreaker.RecordFailure()
+		return err
+	}
+
+	totalCount := 0
+	if countResp.Data != nil && countResp.Data.Count != nil {
+		totalCount = int(*countResp.Data.Count)
+	}
+	al.logger.Info(ctx, fmt.Sprintf("Planning to load %d users concurrently", totalCount))
+
+	if totalCount == 0 {
+		al.logger.Info(ctx, "No users to load")
+		return nil
+	}
+
+	pageSize := al.config.PageSize
+	numPages := (totalCount + pageSize - 1) / pageSize
+
+	// Create channels for coordinating concurrent requests
+	type pageResult struct {
+		offset int
+		data   []*schematicgo.UserDetailResponseData
+		err    error
+	}
+
+	results := make(chan pageResult, numPages)
+
+	// Start concurrent page fetchers
+	var wg sync.WaitGroup
+	for i := 0; i < numPages; i++ {
+		wg.Add(1)
+		go func(pageIndex int) {
+			defer wg.Done()
+
+			offset := pageIndex * pageSize
+
+			// Rate limiting and concurrency control
+			select {
+			case al.concurrencyLimit <- struct{}{}:
+				defer func() { <-al.concurrencyLimit }()
+			case <-ctx.Done():
+				results <- pageResult{offset: offset, err: ctx.Err()}
+				return
+			}
+
+			if err := al.rateLimiter.Wait(ctx); err != nil {
+				results <- pageResult{offset: offset, err: err}
+				return
+			}
+
+			// Circuit breaker check
+			if !al.apiCircuitBreaker.CanExecute() {
+				results <- pageResult{offset: offset, err: fmt.Errorf("circuit breaker open")}
+				return
+			}
+
+			// Fetch the page
+			usersResp, err := al.schematicClient.Companies.ListUsers(ctx, &schematicgo.ListUsersRequest{
+				Limit:  &pageSize,
+				Offset: &offset,
+			})
+
+			if err != nil {
+				al.apiCircuitBreaker.RecordFailure()
+				results <- pageResult{offset: offset, err: err}
+				return
+			}
+
+			al.apiCircuitBreaker.RecordSuccess()
+			results <- pageResult{offset: offset, data: usersResp.Data}
+		}(i)
+	}
+
+	// Wait for all requests to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Process results and cache users
+	var allCacheKeys []string
+	processedCount := 0
+
+	for result := range results {
+		if result.err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to fetch users page at offset %d: %v", result.offset, result.err))
+			continue
+		}
+
+		for _, userData := range result.data {
+			user := convertToRulesEngineUser(userData)
+
+			cacheResults := al.cacheUserForKeys(ctx, user)
+			for cacheKey, cacheErr := range cacheResults {
+				if cacheErr != nil {
+					al.logger.Error(ctx, fmt.Sprintf("Cache error for user %s key '%s': %v", user.ID, cacheKey, cacheErr))
+				} else {
+					allCacheKeys = append(allCacheKeys, cacheKey)
+				}
+			}
+		}
+
+		processedCount += len(result.data)
+		al.logger.Debug(ctx, fmt.Sprintf("Processed users page at offset %d (%d users)", result.offset, len(result.data)))
+	}
+
+	// Evict missing keys
+	if len(allCacheKeys) > 0 {
+		if err := al.usersCache.DeleteMissing(ctx, allCacheKeys); err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user cache keys: %v", err))
+		}
+	}
+
+	al.totalUsers = processedCount
+	al.logger.Info(ctx, fmt.Sprintf("Successfully cached %d users via concurrent async loading", processedCount))
+	return nil
+}
+
+// loadUsersSequential loads users sequentially (fallback method)
+func (al *AsyncInitialLoader) loadUsersSequential(ctx context.Context) error {
+	pageSize := al.config.PageSize
+	offset := 0
+	totalUsers := 0
+	var allCacheKeys []string
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("users loading cancelled: %w", ctx.Err())
+		default:
+		}
+
+		// Rate limiting
+		if err := al.rateLimiter.Wait(ctx); err != nil {
+			return err
+		}
+
+		// Circuit breaker check
+		if !al.apiCircuitBreaker.CanExecute() {
+			err := fmt.Errorf("users loading blocked by circuit breaker")
+			al.apiCircuitBreaker.RecordFailure()
+			return err
+		}
+
+		usersResp, err := al.schematicClient.Companies.ListUsers(ctx, &schematicgo.ListUsersRequest{
+			Limit:  &pageSize,
+			Offset: &offset,
+		})
+		if err != nil {
+			al.apiCircuitBreaker.RecordFailure()
+			return err
+		}
+
+		al.apiCircuitBreaker.RecordSuccess()
+
+		// Convert and cache users
+		for _, userData := range usersResp.Data {
+			user := convertToRulesEngineUser(userData)
+
+			cacheResults := al.cacheUserForKeys(ctx, user)
+			for cacheKey, cacheErr := range cacheResults {
+				if cacheErr != nil {
+					al.logger.Error(ctx, fmt.Sprintf("Cache error for user %s key '%s': %v", user.ID, cacheKey, cacheErr))
+				} else {
+					allCacheKeys = append(allCacheKeys, cacheKey)
+				}
+			}
+		}
+
+		totalUsers += len(usersResp.Data)
+
+		// Check if we reached the end
+		if len(usersResp.Data) < pageSize {
+			break
+		}
+
+		offset += pageSize
+	}
+
+	// Evict missing keys
+	if len(allCacheKeys) > 0 {
+		if err := al.usersCache.DeleteMissing(ctx, allCacheKeys); err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user cache keys: %v", err))
+		}
+	}
+
+	al.totalUsers = totalUsers
+	al.logger.Info(ctx, fmt.Sprintf("Successfully cached %d users via sequential async loading", totalUsers))
+	return nil
+}
+
+// cacheCompanyForKeys caches a company for all its key combinations (matching existing implementation)
+func (al *AsyncInitialLoader) cacheCompanyForKeys(ctx context.Context, company *rulesengine.Company) map[string]error {
+	if company == nil || len(company.Keys) == 0 {
+		return nil
+	}
+
+	cacheResults := make(map[string]error)
+
+	for key, value := range company.Keys {
+		companyKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+		err := al.companiesCache.Set(ctx, companyKey, company, al.cacheTTL)
+		cacheResults[companyKey] = err
+	}
+
+	return cacheResults
+}
+
+// cacheUserForKeys caches a user for all its key combinations (matching existing implementation)
+func (al *AsyncInitialLoader) cacheUserForKeys(ctx context.Context, user *rulesengine.User) map[string]error {
+	if user == nil || len(user.Keys) == 0 {
+		return nil
+	}
+
+	cacheResults := make(map[string]error)
+
+	for key, value := range user.Keys {
+		userKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+		err := al.usersCache.Set(ctx, userKey, user, al.cacheTTL)
+		cacheResults[userKey] = err
+	}
+
+	return cacheResults
+}
+
+// AsyncConnectionReadyHandler implements the ConnectionReadyHandler interface for asynchronous loading
+type AsyncConnectionReadyHandler struct {
+	schematicClient *client.Client
+	wsClient        *schematicdatastreamws.Client
+	companiesCache  CacheProvider[*rulesengine.Company]
+	usersCache      CacheProvider[*rulesengine.User]
+	flagsCache      CacheProvider[*rulesengine.Flag]
+	logger          *SchematicLogger
+	cacheTTL        time.Duration
+	asyncLoader     *AsyncInitialLoader
+}
+
+// NewAsyncConnectionReadyHandler creates a new async connection ready handler
+func NewAsyncConnectionReadyHandler(
+	schematicClient *client.Client,
+	wsClient *schematicdatastreamws.Client,
+	companiesCache CacheProvider[*rulesengine.Company],
+	usersCache CacheProvider[*rulesengine.User],
+	flagsCache CacheProvider[*rulesengine.Flag],
+	logger *SchematicLogger,
+	cacheTTL time.Duration,
+	asyncLoaderConfig AsyncLoaderConfig,
+) *AsyncConnectionReadyHandler {
+	asyncLoader := NewAsyncInitialLoader(
+		schematicClient,
+		companiesCache,
+		usersCache,
+		logger,
+		cacheTTL,
+		asyncLoaderConfig,
+	)
+
+	return &AsyncConnectionReadyHandler{
+		schematicClient: schematicClient,
+		wsClient:        wsClient,
+		companiesCache:  companiesCache,
+		usersCache:      usersCache,
+		flagsCache:      flagsCache,
+		logger:          logger,
+		cacheTTL:        cacheTTL,
+		asyncLoader:     asyncLoader,
+	}
+}
+
+// OnConnectionReady implements the ConnectionReadyHandler interface for asynchronous loading
+func (h *AsyncConnectionReadyHandler) OnConnectionReady(ctx context.Context) error {
+	// Async mode: start loading in background, establish connection quickly
+	h.logger.Info(ctx, "Starting async initial data loading for fast connection setup")
+	h.asyncLoader.StartAsyncLoading(ctx)
+
+	// 1. Subscribe to updates immediately (WebSocket connection is ready)
+	if err := h.subscribeToUpdates(ctx); err != nil {
+		return fmt.Errorf("failed to subscribe to updates: %w", err)
+	}
+
+	// 2. Request flags data from datastream
+	if err := h.requestFlagsData(ctx); err != nil {
+		return fmt.Errorf("failed to request flags data: %w", err)
+	}
+
+	h.logger.Info(ctx, "Connection ready setup completed with async loading (companies/users loading in background)")
+	return nil
+}
+
+// SetWebSocketClient sets the WebSocket client for AsyncConnectionReadyHandler
+func (h *AsyncConnectionReadyHandler) SetWebSocketClient(wsClient *schematicdatastreamws.Client) {
+	h.wsClient = wsClient
+}
+
+// WaitForAsyncLoading waits for async initial loading to complete
+func (h *AsyncConnectionReadyHandler) WaitForAsyncLoading(ctx context.Context) error {
+	return h.asyncLoader.WaitForCompletion(ctx)
+}
+
+// GetAsyncLoadingStatus returns the status of async loading
+func (h *AsyncConnectionReadyHandler) GetAsyncLoadingStatus() (companiesLoaded, usersLoaded bool, companiesErr, usersErr error) {
+	return h.asyncLoader.GetLoadingStatus()
+}
+
+// GetAsyncLoadingMetrics returns loading metrics
+func (h *AsyncConnectionReadyHandler) GetAsyncLoadingMetrics() (companiesTime, usersTime time.Duration, totalCompanies, totalUsers int) {
+	return h.asyncLoader.GetLoadingMetrics()
+}
+
+// subscribeToUpdates for AsyncConnectionReadyHandler
+func (h *AsyncConnectionReadyHandler) subscribeToUpdates(ctx context.Context) error {
+	h.logger.Info(ctx, "Subscribing to company and user updates")
+
+	// Subscribe to all company updates using bulk subscription entity type
+	companySubscription := &schematicdatastreamws.DataStreamBaseReq{
+		Data: schematicdatastreamws.DataStreamReq{
+			Action:     schematicdatastreamws.ActionStart,
+			EntityType: schematicdatastreamws.EntityTypeCompanies,
+		},
+	}
+	if err := h.wsClient.SendMessage(companySubscription); err != nil {
+		h.logger.Error(ctx, fmt.Sprintf("Failed to subscribe to company updates: %v", err))
+		return err
+	}
+
+	// Subscribe to all user updates using bulk subscription entity type
+	userSubscription := &schematicdatastreamws.DataStreamBaseReq{
+		Data: schematicdatastreamws.DataStreamReq{
+			Action:     schematicdatastreamws.ActionStart,
+			EntityType: schematicdatastreamws.EntityTypeUsers,
+		},
+	}
+	if err := h.wsClient.SendMessage(userSubscription); err != nil {
+		h.logger.Error(ctx, fmt.Sprintf("Failed to subscribe to user updates: %v", err))
+		return err
+	}
+
+	h.logger.Info(ctx, "Successfully subscribed to company and user updates")
+	return nil
+}
+
+// requestFlagsData for AsyncConnectionReadyHandler
+func (h *AsyncConnectionReadyHandler) requestFlagsData(ctx context.Context) error {
+	h.logger.Info(ctx, "Requesting flags data from datastream")
+
+	// Request flags data using datastream format
+	flagsRequest := &schematicdatastreamws.DataStreamBaseReq{
+		Data: schematicdatastreamws.DataStreamReq{
+			Action:     schematicdatastreamws.ActionStart,
+			EntityType: schematicdatastreamws.EntityTypeFlags,
+		},
+	}
+	if err := h.wsClient.SendMessage(flagsRequest); err != nil {
+		h.logger.Error(ctx, fmt.Sprintf("Failed to request flags data: %v", err))
+		return err
+	}
+
+	h.logger.Info(ctx, "Successfully requested flags data")
 	return nil
 }
