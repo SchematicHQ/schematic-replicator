@@ -112,7 +112,6 @@ func (r *redisCache[T]) Delete(ctx context.Context, key string) error {
 
 // DeleteMissing removes keys that are not in the provided list
 func (r *redisCache[T]) DeleteMissing(ctx context.Context, keys []string) error {
-	// Get all keys with the pattern (assuming cache keys have a pattern)
 	if len(keys) == 0 {
 		return nil
 	}
@@ -153,9 +152,19 @@ func (r *redisCache[T]) DeleteMissing(ctx context.Context, keys []string) error 
 		}
 	}
 
-	// Delete the keys in batches
 	if len(keysToDelete) > 0 {
-		return r.client.Del(ctx, keysToDelete...).Err()
+		var deletionErrors []error
+
+		for _, key := range keysToDelete {
+			if err := r.client.Del(ctx, key).Err(); err != nil {
+				deletionErrors = append(deletionErrors, fmt.Errorf("failed to delete key %s: %w", key, err))
+			}
+		}
+
+		// Return first error if any occurred, but continue processing all keys
+		if len(deletionErrors) > 0 {
+			return fmt.Errorf("failed to delete %d/%d keys, first error: %w", len(deletionErrors), len(keysToDelete), deletionErrors[0])
+		}
 	}
 
 	return nil
