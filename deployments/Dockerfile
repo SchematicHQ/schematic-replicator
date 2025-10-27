@@ -47,7 +47,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
     .
 
 # Runtime stage using Alpine for minimal attack surface with built-in curl
-FROM alpine:3.18
+FROM alpine:3.22
 
 # Re-declare build args for runtime stage
 ARG BUILDTIME
