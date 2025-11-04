@@ -5,7 +5,7 @@ go 1.25.1
 require (
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/redis/go-redis/v9 v9.16.0
-	github.com/schematichq/rulesengine v0.1.8
+	github.com/schematichq/rulesengine v0.1.9
 	github.com/schematichq/schematic-datastream-ws v0.2.3
 	github.com/schematichq/schematic-go v1.3.6
 	github.com/stretchr/testify v1.11.1
