@@ -10,7 +10,7 @@ Pull and run the latest version from Docker Hub:
 
 ```bash
 # Pull the latest image
-docker pull schematichq/datastream-replicator:latest
+docker pull getschematic/schematic-replicator:latest
 
 # Run with your Schematic API key and Redis connection
 docker run -d \
@@ -18,7 +18,7 @@ docker run -d \
   -p 8090:8090 \
   -e SCHEMATIC_API_KEY="your-api-key-here" \
   -e REDIS_URL="redis://your-redis-host:6379" \
-  schematichq/datastream-replicator:latest
+  getschematic/schematic-replicator:latest
 
 # Check health status
 curl http://localhost:8090/health
