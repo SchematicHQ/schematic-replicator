@@ -923,6 +923,8 @@ func (h *AsyncReplicatorMessageHandler) processBulkFlagsMessage(ctx context.Cont
 			}
 		}
 
+		h.logger.Info(ctx, fmt.Sprintf("Successfully cached %d flags", len(flags)))
+
 	default:
 		h.logger.Debug(ctx, fmt.Sprintf("Unhandled bulk flags message type: %s", message.MessageType))
 	}

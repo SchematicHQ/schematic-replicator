@@ -31,6 +31,10 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - HEALTH_PORT=${HEALTH_PORT:-8090}
       
+      # WebSocket keepalive configuration (to handle load balancer timeouts)
+      - WS_PING_INTERVAL=${WS_PING_INTERVAL:-30s}
+      - WS_PONG_WAIT=${WS_PONG_WAIT:-40s}
+      
       # Redis configuration
       - REDIS_ADDR=redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}

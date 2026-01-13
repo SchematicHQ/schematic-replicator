@@ -42,6 +42,23 @@ For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 - `LOG_LEVEL`: Logging level - `debug`, `info`, `warn`, `error` (default: `info`)
 - `HEALTH_PORT`: Health server port (default: `8090`)
 
+### WebSocket Keepalive Configuration
+Configure ping/pong intervals to handle load balancer timeouts:
+
+- `WS_PING_INTERVAL`: How often to send WebSocket pings (default: `30s`, format: `20s`, `45s`, etc.)
+- `WS_PONG_WAIT`: How long to wait for pong response before considering connection dead (default: `40s`)
+
+**Load Balancer Timeout Guidelines**:
+- Most cloud load balancers: Keep defaults (30s ping, 40s pong for 60s LB timeout)
+- Aggressive LB (30s timeout): Use `WS_PING_INTERVAL=15s WS_PONG_WAIT=25s`
+- Relaxed LB (120s+ timeout): Use `WS_PING_INTERVAL=50s WS_PONG_WAIT=60s`
+
+Example for aggressive load balancer:
+```bash
+export WS_PING_INTERVAL="15s"
+export WS_PONG_WAIT="25s"
+```
+
 ### Async Processing Configuration (Performance Tuning)
 These settings allow you to optimize performance for your specific infrastructure and workload:
 

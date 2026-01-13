@@ -274,6 +274,35 @@ func main() {
 		}
 	}
 
+	// Configure WebSocket options early so we can populate them as we parse environment variables
+	wsOptions := schematicdatastreamws.ClientOptions{
+		URL:                  datastreamURL,
+		ApiKey:               apiKey,
+		MaxReconnectAttempts: 10,
+		MinReconnectDelay:    1 * time.Second,
+		MaxReconnectDelay:    30 * time.Second,
+	}
+
+	// Get WebSocket ping/pong intervals from environment (optional)
+	// If not set, will use defaults from schematic-datastream-ws library (30s ping, 40s pong)
+	if pingStr := os.Getenv("WS_PING_INTERVAL"); pingStr != "" {
+		logger.Debug(context.Background(), "Setting ping interval from environment variable WS_PING_INTERVAL="+pingStr)
+		if parsed, err := time.ParseDuration(pingStr); err == nil {
+			wsOptions.PingPeriod = parsed
+		} else {
+			logger.Warn(context.Background(), fmt.Sprintf("Invalid WS_PING_INTERVAL value '%s', ignoring", pingStr))
+		}
+	}
+
+	if pongStr := os.Getenv("WS_PONG_WAIT"); pongStr != "" {
+		logger.Debug(context.Background(), "Setting pong wait from environment variable WS_PONG_WAIT="+pongStr)
+		if parsed, err := time.ParseDuration(pongStr); err == nil {
+			wsOptions.PongWait = parsed
+		} else {
+			logger.Warn(context.Background(), fmt.Sprintf("Invalid WS_PONG_WAIT value '%s', ignoring", pongStr))
+		}
+	}
+
 	logger.Info(context.Background(), "Starting Schematic Datastream Replicator...")
 	logger.Info(context.Background(), fmt.Sprintf("API URL: %s", apiBaseURL))
 	if os.Getenv("SCHEMATIC_DATASTREAM_URL") != "" {
@@ -459,17 +488,10 @@ func main() {
 		connectionReadyHandlerFunc = syncHandler.OnConnectionReady
 	}
 
-	// Configure the WebSocket client
-	wsOptions := schematicdatastreamws.ClientOptions{
-		URL:                    datastreamURL,
-		ApiKey:                 apiKey,
-		MessageHandler:         messageHandler.HandleMessage,
-		ConnectionReadyHandler: connectionReadyHandlerFunc,
-		Logger:                 logger,
-		MaxReconnectAttempts:   10,
-		MinReconnectDelay:      1 * time.Second,
-		MaxReconnectDelay:      30 * time.Second,
-	}
+	// Set message and connection handlers on wsOptions
+	wsOptions.MessageHandler = messageHandler.HandleMessage
+	wsOptions.ConnectionReadyHandler = connectionReadyHandlerFunc
+	wsOptions.Logger = logger
 
 	datastreamClient, err := schematicdatastreamws.NewClient(wsOptions)
 	if err != nil {
