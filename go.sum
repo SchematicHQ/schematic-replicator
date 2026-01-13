@@ -24,10 +24,14 @@ github.com/redis/go-redis/v9 v9.16.0 h1:OotgqgLSRCmzfqChbQyG1PHC3tLNR89DG4jdOERS
 github.com/redis/go-redis/v9 v9.16.0/go.mod h1:u410H11HMLoB+TP67dz8rL9s6QW2j76l0//kSOd3370=
 github.com/schematichq/rulesengine v0.1.8 h1:hmP0dXP3SNR43PbgnUihuvGnPpWgejEM3tY8/yTNkf0=
 github.com/schematichq/rulesengine v0.1.8/go.mod h1:HmweBgjg+kVe6VuNMLc7FISHFF0wzr5cVGLAxlVP8+4=
+github.com/schematichq/rulesengine v0.1.10 h1:pe4WG6DB7u+OTP08bhB6tMQFqYYqxTdhPKcpemFB/cs=
+github.com/schematichq/rulesengine v0.1.10/go.mod h1:HmweBgjg+kVe6VuNMLc7FISHFF0wzr5cVGLAxlVP8+4=
 github.com/schematichq/schematic-datastream-ws v0.2.5 h1:cerNpFjrGikJSxzFtIr6vK6b/CrZMnE7orkRHTa+9a0=
 github.com/schematichq/schematic-datastream-ws v0.2.5/go.mod h1:NKrg326C9YfCDOI84On5GZhvrovzDpFCzW8wdBwPZ3g=
 github.com/schematichq/schematic-go v1.3.6 h1:4KK/vryfR/gvovw8Db8stl+Zv5lZ4YVhqIqdFwMnNoE=
 github.com/schematichq/schematic-go v1.3.6/go.mod h1:GznXXQAWnylJRnT1HWRb63GVVm/ZGOACo1K30crSORM=
+github.com/schematichq/schematic-go v1.3.7 h1:bjAN3C8Gtea7eCbLhREQYW1xfTUDa9gDGBXZ9DsvwRg=
+github.com/schematichq/schematic-go v1.3.7/go.mod h1:29WUmtt4rcWUtJrefilJXotgQ7TeJoUraRb8O/Bk250=
 github.com/stretchr/objx v0.5.2 h1:xuMeJ0Sdp5ZMRXx/aWO6RZxdr3beISkG5/G/aIRr3pY=
 github.com/stretchr/objx v0.5.2/go.mod h1:FRsXN1f5AsAjCGJKqEizvkpNtU+EGNCLh3NxZ/8L+MA=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
