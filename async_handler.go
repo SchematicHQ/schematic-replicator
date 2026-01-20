@@ -364,6 +364,11 @@ func (h *AsyncReplicatorMessageHandler) Shutdown(ctx context.Context) error {
 	// Wait for all workers to finish with timeout
 	done := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Panic in shutdown wait goroutine: %v", r))
+			}
+		}()
 		h.workerWg.Wait()
 		close(done)
 	}()
@@ -1010,6 +1015,7 @@ type AsyncInitialLoader struct {
 	usersLoaded        bool
 	companiesLoadError error
 	usersLoadError     error
+	startOnce          sync.Once // Ensures loading only starts once
 
 	// Completion channels
 	companiesLoadChan chan struct{}
@@ -1151,51 +1157,71 @@ func NewAsyncInitialLoader(
 // StartAsyncLoading begins loading companies and users asynchronously
 // Returns immediately, allowing the connection to be established without waiting
 func (al *AsyncInitialLoader) StartAsyncLoading(ctx context.Context) {
-	al.logger.Info(ctx, "Starting asynchronous initial data loading")
+	al.startOnce.Do(func() {
+		al.logger.Info(ctx, "Starting asynchronous initial data loading")
 
-	// Start companies loading in background
-	go func() {
-		defer close(al.companiesLoadChan)
+		// Start companies loading in background
+		go func() {
+			defer close(al.companiesLoadChan)
+			defer func() {
+				if r := recover(); r != nil {
+					al.logger.Error(ctx, fmt.Sprintf("Panic in companies loading goroutine: %v", r))
+					al.loadingMu.Lock()
+					al.companiesLoaded = true
+					al.companiesLoadError = fmt.Errorf("panic during companies loading: %v", r)
+					al.loadingMu.Unlock()
+				}
+			}()
 
-		startTime := time.Now()
-		err := al.loadCompaniesAsync(ctx)
-		loadTime := time.Since(startTime)
+			startTime := time.Now()
+			err := al.loadCompaniesAsync(ctx)
+			loadTime := time.Since(startTime)
 
-		al.loadingMu.Lock()
-		al.companiesLoaded = true
-		al.companiesLoadError = err
-		al.companiesLoadTime = loadTime
-		al.loadingMu.Unlock()
+			al.loadingMu.Lock()
+			al.companiesLoaded = true
+			al.companiesLoadError = err
+			al.companiesLoadTime = loadTime
+			al.loadingMu.Unlock()
 
-		if err != nil {
-			al.logger.Error(ctx, fmt.Sprintf("Async companies loading failed after %v: %v", loadTime, err))
-		} else {
-			al.logger.Info(ctx, fmt.Sprintf("Async companies loading completed successfully in %v (%d companies)", loadTime, al.totalCompanies))
-		}
-	}()
+			if err != nil {
+				al.logger.Error(ctx, fmt.Sprintf("Async companies loading failed after %v: %v", loadTime, err))
+			} else {
+				al.logger.Info(ctx, fmt.Sprintf("Async companies loading completed successfully in %v (%d companies)", loadTime, al.totalCompanies))
+			}
+		}()
 
-	// Start users loading in background
-	go func() {
-		defer close(al.usersLoadChan)
+		// Start users loading in background
+		go func() {
+			defer close(al.usersLoadChan)
+			defer func() {
+				if r := recover(); r != nil {
+					al.logger.Error(ctx, fmt.Sprintf("Panic in users loading goroutine: %v", r))
+					al.loadingMu.Lock()
+					al.usersLoaded = true
+					al.usersLoadError = fmt.Errorf("panic during users loading: %v", r)
+					al.loadingMu.Unlock()
+				}
+			}()
 
-		startTime := time.Now()
-		err := al.loadUsersAsync(ctx)
-		loadTime := time.Since(startTime)
+			startTime := time.Now()
+			err := al.loadUsersAsync(ctx)
+			loadTime := time.Since(startTime)
 
-		al.loadingMu.Lock()
-		al.usersLoaded = true
-		al.usersLoadError = err
-		al.usersLoadTime = loadTime
-		al.loadingMu.Unlock()
+			al.loadingMu.Lock()
+			al.usersLoaded = true
+			al.usersLoadError = err
+			al.usersLoadTime = loadTime
+			al.loadingMu.Unlock()
 
-		if err != nil {
-			al.logger.Error(ctx, fmt.Sprintf("Async users loading failed after %v: %v", loadTime, err))
-		} else {
-			al.logger.Info(ctx, fmt.Sprintf("Async users loading completed successfully in %v (%d users)", loadTime, al.totalUsers))
-		}
-	}()
+			if err != nil {
+				al.logger.Error(ctx, fmt.Sprintf("Async users loading failed after %v: %v", loadTime, err))
+			} else {
+				al.logger.Info(ctx, fmt.Sprintf("Async users loading completed successfully in %v (%d users)", loadTime, al.totalUsers))
+			}
+		}()
 
-	al.logger.Info(ctx, "Async initial data loading started in background")
+		al.logger.Info(ctx, "Async initial data loading started in background")
+	})
 }
 
 // WaitForCompletion waits for both companies and users to finish loading
@@ -1359,6 +1385,11 @@ func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error
 
 	// Wait for all requests to complete
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				al.logger.Error(ctx, fmt.Sprintf("Panic in company results closer: %v", r))
+			}
+		}()
 		wg.Wait()
 		close(results)
 	}()
@@ -1497,6 +1528,11 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 
 	// Wait for all requests to complete
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				al.logger.Error(ctx, fmt.Sprintf("Panic in user results closer: %v", r))
+			}
+		}()
 		wg.Wait()
 		close(results)
 	}()

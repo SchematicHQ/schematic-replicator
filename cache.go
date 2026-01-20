@@ -281,6 +281,11 @@ func NewCacheCleanupManager(
 // Start begins the periodic cache cleanup process
 func (c *CacheCleanupManager) Start(ctx context.Context) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.logger.Error(ctx, fmt.Sprintf("Panic in cache cleanup manager: %v", r))
+			}
+		}()
 		c.logger.Info(ctx, "Starting cache cleanup manager")
 		defer c.logger.Info(ctx, "Cache cleanup manager stopped")
 
