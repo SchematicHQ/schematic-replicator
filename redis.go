@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9/maintnotifications"
 )
 
 func setupRedisClient() redis.Cmdable {
@@ -43,6 +44,13 @@ func setupRedisSingle() *redis.Client {
 		DB:       db,
 	}
 
+	// Disable maintenance mode notifications by default (Redis Cloud/Enterprise feature)
+	if os.Getenv("REDIS_ENABLE_MAINTENANCE_NOTIFICATIONS") != "true" {
+		opts.MaintNotificationsConfig = &maintnotifications.Config{
+			Mode: maintnotifications.ModeDisabled,
+		}
+	}
+
 	// Optional TLS configuration
 	if os.Getenv("REDIS_TLS") == "true" {
 		opts.TLSConfig = &tls.Config{}
@@ -67,6 +75,13 @@ func setupRedisCluster() *redis.ClusterClient {
 	opts := &redis.ClusterOptions{
 		Addrs:    addrs,
 		Password: password,
+	}
+
+	// Disable maintenance mode notifications by default (Redis Cloud/Enterprise feature)
+	if os.Getenv("REDIS_ENABLE_MAINTENANCE_NOTIFICATIONS") != "true" {
+		opts.MaintNotificationsConfig = &maintnotifications.Config{
+			Mode: maintnotifications.ModeDisabled,
+		}
 	}
 
 	// Optional TLS configuration

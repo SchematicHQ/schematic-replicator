@@ -103,6 +103,11 @@ func NewHealthServer(port int, datastreamClient *schematicdatastreamws.Client, r
 // Start starts the health server
 func (hs *HealthServer) Start() {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				hs.logger.Error(context.Background(), fmt.Sprintf("Panic in health server: %v", r))
+			}
+		}()
 		hs.logger.Info(context.Background(), fmt.Sprintf("Health server starting on port %s", hs.server.Addr))
 		if err := hs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			hs.logger.Error(context.Background(), fmt.Sprintf("Health server error: %v", err))
@@ -523,6 +528,11 @@ func main() {
 
 	// Monitor for errors
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error(context.Background(), fmt.Sprintf("Panic in error monitor: %v", r))
+			}
+		}()
 		errorChan := datastreamClient.GetErrorChannel()
 		for err := range errorChan {
 			logger.Error(context.Background(), fmt.Sprintf("WebSocket error: %v", err))
@@ -531,6 +541,11 @@ func main() {
 
 	// Monitor async handler metrics
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error(context.Background(), fmt.Sprintf("Panic in metrics monitor: %v", r))
+			}
+		}()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
