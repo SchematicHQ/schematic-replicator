@@ -1032,7 +1032,7 @@ func convertToRulesEngineTraits(entityTraits []*schematicgo.EntityTraitDetailRes
 				TraitDefinition: &rulesengine.TraitDefinition{
 					ID:             entityTrait.Definition.ID,
 					EntityType:     entityType,
-					ComparableType: convertTraitTypeToComparableType(entityTrait.Definition.TraitType),
+					ComparableType: convertTraitTypeToComparableType(string(entityTrait.Definition.TraitType)),
 				},
 			}
 			traits = append(traits, rulesEngineTrait)
