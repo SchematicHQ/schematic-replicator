@@ -17,7 +17,7 @@ docker run -d \
   --name schematic-replicator \
   -p 8090:8090 \
   -e SCHEMATIC_API_KEY="your-api-key-here" \
-  -e REDIS_URL="redis://your-redis-host:6379" \
+  -e REDIS_ADDR="redis://your-redis-host:6379" \
   getschematic/schematic-replicator:latest
 
 # Check health status
