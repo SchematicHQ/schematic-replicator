@@ -783,6 +783,8 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 
 	company.Rules = convertRulesToRulesEngine(data.Rules)
 
+	company.Entitlements = convertEntitlementsToRulesEngine(data.Entitlements)
+
 	return company
 }
 
@@ -907,6 +909,57 @@ func convertRulesToRulesEngine(apiRules []*schematicgo.Rule) []*rulesengine.Rule
 	}
 
 	return rules
+}
+
+func convertEntitlementsToRulesEngine(apiEntitlements []*schematicgo.FeatureEntitlement) []*rulesengine.FeatureEntitlement {
+	if apiEntitlements == nil {
+		return make([]*rulesengine.FeatureEntitlement, 0)
+	}
+
+	entitlements := make([]*rulesengine.FeatureEntitlement, 0, len(apiEntitlements))
+	for _, apiEnt := range apiEntitlements {
+		if apiEnt == nil {
+			continue
+		}
+
+		rulesEngineEnt := &rulesengine.FeatureEntitlement{
+			FeatureID:       apiEnt.FeatureID,
+			FeatureKey:      apiEnt.FeatureKey,
+			ValueType:       rulesengine.EntitlementValueType(apiEnt.ValueType),
+			EventName:       apiEnt.EventName,
+			MetricResetAt:   apiEnt.MetricResetAt,
+			CreditID:        apiEnt.CreditID,
+			CreditTotal:     apiEnt.CreditTotal,
+			CreditUsed:      apiEnt.CreditUsed,
+			CreditRemaining: apiEnt.CreditRemaining,
+		}
+
+		// Type conversions for numeric fields
+		if apiEnt.Allocation != nil {
+			val := int64(*apiEnt.Allocation)
+			rulesEngineEnt.Allocation = &val
+		}
+
+		if apiEnt.Usage != nil {
+			val := int64(*apiEnt.Usage)
+			rulesEngineEnt.Usage = &val
+		}
+
+		// Type conversions for enums
+		if apiEnt.MetricPeriod != nil {
+			val := rulesengine.MetricPeriod(*apiEnt.MetricPeriod)
+			rulesEngineEnt.MetricPeriod = &val
+		}
+
+		if apiEnt.MonthReset != nil {
+			val := rulesengine.MetricPeriodMonthReset(*apiEnt.MonthReset)
+			rulesEngineEnt.MonthReset = &val
+		}
+
+		entitlements = append(entitlements, rulesEngineEnt)
+	}
+
+	return entitlements
 }
 
 func convertToRulesEngineConditions(apiConditions []*schematicgo.Condition) []*rulesengine.Condition {
@@ -1087,8 +1140,6 @@ func convertToRulesEngineConditionType(conditionType schematicgo.ConditionCondit
 		return rulesengine.ConditionTypeMetric
 	case "billing_product":
 		return rulesengine.ConditionTypeBillingProduct
-	case "crm_product":
-		return rulesengine.ConditionTypeCrmProduct
 	case "credit":
 		return rulesengine.ConditionTypeCredit
 	}
