@@ -145,6 +145,7 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 			// Create mocks
 			logger := NewSchematicLogger()
 			mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
+			mockCompanyLookupCache := NewMockCacheProvider[string]()
 			mockUserCache := NewMockCacheProvider[*rulesengine.User]()
 			mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 
@@ -152,6 +153,7 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 			handler := NewReplicatorMessageHandler(
 				logger,
 				mockCompanyCache,
+				mockCompanyLookupCache,
 				mockUserCache,
 				mockFlagCache,
 				5*time.Minute,
@@ -169,16 +171,20 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 
 			// Setup expectations
 			if tt.messageType == schematicdatastreamws.MessageTypeDelete {
-				// For delete operations, expect Delete calls for each key
+				// For delete operations, expect Delete on ID key and lookup keys
+				idKey := companyIDCacheKey(tt.company.ID)
+				mockCompanyCache.On("Delete", mock.Anything, idKey).Return(nil)
 				for key, value := range tt.company.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-					mockCompanyCache.On("Delete", mock.Anything, cacheKey).Return(nil)
+					mockCompanyLookupCache.On("Delete", mock.Anything, cacheKey).Return(nil)
 				}
 			} else {
-				// For create/update operations, expect Set calls for each key
+				// For create/update operations, expect Set on ID key and lookup keys
+				idKey := companyIDCacheKey(tt.company.ID)
+				mockCompanyCache.On("Set", mock.Anything, idKey, tt.company, 5*time.Minute).Return(nil)
 				for key, value := range tt.company.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-					mockCompanyCache.On("Set", mock.Anything, cacheKey, tt.company, 5*time.Minute).Return(nil)
+					mockCompanyLookupCache.On("Set", mock.Anything, cacheKey, tt.company.ID, 5*time.Minute).Return(nil)
 				}
 			}
 
@@ -195,6 +201,7 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 
 			// Verify mock expectations
 			mockCompanyCache.AssertExpectations(t)
+			mockCompanyLookupCache.AssertExpectations(t)
 		})
 	}
 }
@@ -231,6 +238,7 @@ func TestReplicatorMessageHandler_HandleUserMessage(t *testing.T) {
 			// Create mocks
 			logger := NewSchematicLogger()
 			mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
+			mockCompanyLookupCache := NewMockCacheProvider[string]()
 			mockUserCache := NewMockCacheProvider[*rulesengine.User]()
 			mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 
@@ -238,6 +246,7 @@ func TestReplicatorMessageHandler_HandleUserMessage(t *testing.T) {
 			handler := NewReplicatorMessageHandler(
 				logger,
 				mockCompanyCache,
+				mockCompanyLookupCache,
 				mockUserCache,
 				mockFlagCache,
 				5*time.Minute,
@@ -317,6 +326,7 @@ func TestReplicatorMessageHandler_HandleFlagMessage(t *testing.T) {
 			// Create mocks
 			logger := NewSchematicLogger()
 			mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
+			mockCompanyLookupCache := NewMockCacheProvider[string]()
 			mockUserCache := NewMockCacheProvider[*rulesengine.User]()
 			mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 
@@ -324,6 +334,7 @@ func TestReplicatorMessageHandler_HandleFlagMessage(t *testing.T) {
 			handler := NewReplicatorMessageHandler(
 				logger,
 				mockCompanyCache,
+				mockCompanyLookupCache,
 				mockUserCache,
 				mockFlagCache,
 				5*time.Minute,
@@ -392,6 +403,7 @@ func TestReplicatorMessageHandler_HandleFlagsMessage(t *testing.T) {
 		// Create mocks
 		logger := NewSchematicLogger()
 		mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
+		mockCompanyLookupCache := NewMockCacheProvider[string]()
 		mockUserCache := NewMockCacheProvider[*rulesengine.User]()
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 
@@ -399,6 +411,7 @@ func TestReplicatorMessageHandler_HandleFlagsMessage(t *testing.T) {
 		handler := NewReplicatorMessageHandler(
 			logger,
 			mockCompanyCache,
+			mockCompanyLookupCache,
 			mockUserCache,
 			mockFlagCache,
 			5*time.Minute,
@@ -453,6 +466,7 @@ func TestReplicatorMessageHandler_SingleVsBulkFlagProcessing(t *testing.T) {
 		// Create mocks
 		logger := NewSchematicLogger()
 		mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
+		mockCompanyLookupCache := NewMockCacheProvider[string]()
 		mockUserCache := NewMockCacheProvider[*rulesengine.User]()
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 
@@ -460,6 +474,7 @@ func TestReplicatorMessageHandler_SingleVsBulkFlagProcessing(t *testing.T) {
 		handler := NewReplicatorMessageHandler(
 			logger,
 			mockCompanyCache,
+			mockCompanyLookupCache,
 			mockUserCache,
 			mockFlagCache,
 			5*time.Minute,

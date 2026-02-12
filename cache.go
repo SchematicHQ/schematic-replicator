@@ -26,6 +26,12 @@ func resourceKeyToCacheKey(resourceType string, key string, value string) string
 	return fmt.Sprintf("%s:%s:%s:%s:%s", cacheKeyPrefix, resourceType, rulesengine.VersionKey, strings.ToLower(key), strings.ToLower(value))
 }
 
+// companyIDCacheKey generates a cache key for a company by its ID (not version-scoped)
+// Format: schematic:company:{companyID}
+func companyIDCacheKey(id string) string {
+	return fmt.Sprintf("%s:%s:%s", cacheKeyPrefix, cacheKeyPrefixCompany, id)
+}
+
 // CacheProvider is a generic interface for caching operations
 type CacheProvider[T any] interface {
 	Get(ctx context.Context, key string) (T, error)
@@ -402,9 +408,11 @@ func (c *CacheCleanupManager) deleteStaleKeysFromRedis(
 		}
 
 		// Filter keys to find stale ones (not matching current version)
+		// ID-based keys (3 segments, e.g. schematic:company:{id}) are skipped —
+		// they are not version-scoped and are cleaned up by TTL expiration.
 		for _, key := range keys {
 			parts := strings.Split(key, ":")
-			if len(parts) >= 3 {
+			if len(parts) >= 4 {
 				keyVersion := parts[2] // Version is the 3rd part: schematic:type:version:...
 				if keyVersion != currentVersion {
 					staleKeys = append(staleKeys, key)
