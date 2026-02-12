@@ -335,6 +335,9 @@ func main() {
 	usersCache = NewRedisBatchCache[*rulesengine.User](redisClient, cacheTTL)
 	featuresCache = NewRedisBatchCache[*rulesengine.Flag](redisClient, cacheTTL)
 
+	// Company lookup cache stores company ID strings at versioned lookup keys
+	companyLookupCache := NewRedisBatchCache[string](redisClient, cacheTTL)
+
 	// Initialize cache cleanup manager (only if cleanup is enabled)
 	var cacheCleanupManager *CacheCleanupManager
 	if cacheCleanupInterval > 0 {
@@ -474,7 +477,7 @@ func main() {
 	}
 
 	// Create async message handler with caching and batching
-	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, logger, cacheTTL, asyncConfig)
+	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, companyLookupCache, logger, cacheTTL, asyncConfig)
 
 	// Create connection ready handler (wsClient will be set later)
 	var connectionReadyHandlerFunc schematicdatastreamws.ConnectionReadyHandlerFunc
@@ -485,11 +488,11 @@ func main() {
 		logger.Info(context.Background(), fmt.Sprintf("Using async initial loading: page_size=%d, circuit_breaker=[threshold:%d, timeout:%v], concurrency=[max_requests:%d, rate_limit:%d_rps]",
 			asyncLoaderConfig.PageSize, asyncLoaderConfig.CircuitBreakerThreshold, asyncLoaderConfig.CircuitBreakerTimeout,
 			asyncLoaderConfig.MaxConcurrentRequests, asyncLoaderConfig.RateLimitRPS))
-		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, logger, cacheTTL, asyncLoaderConfig)
+		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, logger, cacheTTL, asyncLoaderConfig)
 		connectionReadyHandlerFunc = asyncHandler.OnConnectionReady
 	} else {
 		logger.Info(context.Background(), "Using synchronous initial loading (default)")
-		syncHandler = NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, logger, cacheTTL)
+		syncHandler = NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, logger, cacheTTL)
 		connectionReadyHandlerFunc = syncHandler.OnConnectionReady
 	}
 
