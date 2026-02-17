@@ -84,17 +84,17 @@ func TestCompanyIDCacheKey(t *testing.T) {
 		{
 			name:     "Standard company ID",
 			id:       "comp_abc123",
-			expected: "schematic:company:comp_abc123",
+			expected: fmt.Sprintf("schematic:company:%s:comp_abc123", rulesengine.VersionKey),
 		},
 		{
 			name:     "UUID-style company ID",
 			id:       "550e8400-e29b-41d4-a716-446655440000",
-			expected: "schematic:company:550e8400-e29b-41d4-a716-446655440000",
+			expected: fmt.Sprintf("schematic:company:%s:550e8400-e29b-41d4-a716-446655440000", rulesengine.VersionKey),
 		},
 		{
 			name:     "Empty ID",
 			id:       "",
-			expected: "schematic:company:",
+			expected: fmt.Sprintf("schematic:company:%s:", rulesengine.VersionKey),
 		},
 	}
 
@@ -106,12 +106,13 @@ func TestCompanyIDCacheKey(t *testing.T) {
 	}
 }
 
-func TestCompanyIDCacheKey_HasThreeSegments(t *testing.T) {
-	// ID-based keys must have exactly 3 colon-separated segments
-	// so the cleanup manager correctly skips them
+func TestCompanyIDCacheKey_HasFourSegments(t *testing.T) {
+	// ID-based keys must have exactly 4 colon-separated segments
+	// so the cleanup manager handles them like other versioned keys
 	key := companyIDCacheKey("comp_abc123")
 	parts := splitCacheKey(key)
-	assert.Equal(t, 3, len(parts), "ID-based key should have exactly 3 segments: %s", key)
+	assert.Equal(t, 4, len(parts), "ID-based key should have exactly 4 segments: %s", key)
+	assert.Equal(t, rulesengine.VersionKey, parts[2], "Third segment should be the version key")
 }
 
 func TestResourceKeyToCacheKey_HasFiveSegments(t *testing.T) {
@@ -159,14 +160,18 @@ func TestDeleteStaleKeysFromRedis_SkipsIDBasedKeys(t *testing.T) {
 	oldLookupKey := fmt.Sprintf("schematic:company:%s:domain:test.com", oldVersion)
 	client.Set(ctx, oldLookupKey, `"comp_abc123"`, 0)
 
-	// 3. ID-based key with 3 segments (should be SKIPPED, not deleted)
-	idKey := "schematic:company:comp_abc123"
+	// 3. Current version ID-based key (should be kept)
+	idKey := fmt.Sprintf("schematic:company:%s:comp_abc123", currentVersion)
 	client.Set(ctx, idKey, `{"id":"comp_abc123"}`, 0)
+
+	// 4. Old version ID-based key (should be deleted)
+	oldIDKey := fmt.Sprintf("schematic:company:%s:comp_abc123", oldVersion)
+	client.Set(ctx, oldIDKey, `{"id":"comp_abc123"}`, 0)
 
 	// Verify all keys exist
 	keys, err := client.Keys(ctx, "schematic:company:*").Result()
 	require.NoError(t, err)
-	assert.Equal(t, 3, len(keys))
+	assert.Equal(t, 4, len(keys))
 
 	// Run the cleanup
 	logger := &mockLogger{}
@@ -180,20 +185,24 @@ func TestDeleteStaleKeysFromRedis_SkipsIDBasedKeys(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Only the old version lookup key should be deleted
-	assert.Equal(t, 1, deletedCount, "Should delete only the old version lookup key")
+	// Both old version keys should be deleted
+	assert.Equal(t, 2, deletedCount, "Should delete both old version keys")
 
 	// Verify current version lookup key still exists
 	exists := client.Exists(ctx, currentLookupKey).Val()
 	assert.Equal(t, int64(1), exists, "Current version lookup key should still exist")
 
-	// Verify ID-based key still exists (was skipped)
+	// Verify current version ID-based key still exists
 	exists = client.Exists(ctx, idKey).Val()
-	assert.Equal(t, int64(1), exists, "ID-based key should still exist (skipped by cleanup)")
+	assert.Equal(t, int64(1), exists, "Current version ID-based key should still exist")
 
 	// Verify old version lookup key was deleted
 	exists = client.Exists(ctx, oldLookupKey).Val()
 	assert.Equal(t, int64(0), exists, "Old version lookup key should be deleted")
+
+	// Verify old version ID-based key was deleted
+	exists = client.Exists(ctx, oldIDKey).Val()
+	assert.Equal(t, int64(0), exists, "Old version ID-based key should be deleted")
 }
 
 func TestCompanyIDBasedCaching_Integration(t *testing.T) {
