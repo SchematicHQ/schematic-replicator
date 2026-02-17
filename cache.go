@@ -345,11 +345,8 @@ func (c *CacheCleanupManager) cleanupStaleEntries(ctx context.Context) error {
 	totalDeleted := 0
 
 	for _, p := range patterns {
-		// Create pattern to match stale entries (all except current version)
-		stalePattern := fmt.Sprintf("%s:%s:*", cacheKeyPrefix, p.name)
-
 		// Clean up stale entries for this cache type
-		deletedCount, err := c.deleteStaleKeysForCache(ctx, stalePattern, currentVersion)
+		deletedCount, err := c.deleteStaleKeysForCache(ctx, p.pattern, currentVersion)
 
 		if err != nil {
 			c.logger.Error(ctx, fmt.Sprintf("Failed to cleanup %s cache: %v", p.name, err))
