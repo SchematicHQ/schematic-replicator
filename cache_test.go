@@ -351,6 +351,231 @@ func TestCompanyDelete_IDBasedKeyspace_Integration(t *testing.T) {
 	assert.Equal(t, 0, len(allKeys), "All company keys should be deleted")
 }
 
+func TestUserIDCacheKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		id       string
+		expected string
+	}{
+		{
+			name:     "Standard user ID",
+			id:       "user_abc123",
+			expected: fmt.Sprintf("schematic:user:%s:user_abc123", rulesengine.VersionKey),
+		},
+		{
+			name:     "UUID-style user ID",
+			id:       "550e8400-e29b-41d4-a716-446655440000",
+			expected: fmt.Sprintf("schematic:user:%s:550e8400-e29b-41d4-a716-446655440000", rulesengine.VersionKey),
+		},
+		{
+			name:     "Empty ID",
+			id:       "",
+			expected: fmt.Sprintf("schematic:user:%s:", rulesengine.VersionKey),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := userIDCacheKey(tt.id)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestUserIDCacheKey_HasFourSegments(t *testing.T) {
+	key := userIDCacheKey("user_abc123")
+	parts := splitCacheKey(key)
+	assert.Equal(t, 4, len(parts), "ID-based key should have exactly 4 segments: %s", key)
+	assert.Equal(t, rulesengine.VersionKey, parts[2], "Third segment should be the version key")
+}
+
+func TestUserIDBasedCaching_Integration(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	ctx := context.Background()
+	cacheTTL := 5 * time.Minute
+
+	usersCache := NewRedisBatchCache[*rulesengine.User](client, cacheTTL)
+	userLookupCache := NewRedisBatchCache[string](client, cacheTTL)
+
+	user := &rulesengine.User{
+		ID:            "user_abc123",
+		AccountID:     "acct_001",
+		EnvironmentID: "env_001",
+		Keys: map[string]string{
+			"email":   "alice@test.com",
+			"user_id": "usr-123",
+		},
+	}
+
+	// Write using the ID-based keyspace pattern
+	idKey := userIDCacheKey(user.ID)
+	err = usersCache.Set(ctx, idKey, user, cacheTTL)
+	require.NoError(t, err)
+
+	for key, value := range user.Keys {
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+		err = userLookupCache.Set(ctx, lookupKey, user.ID, cacheTTL)
+		require.NoError(t, err)
+	}
+
+	// Verify: direct lookup by ID key
+	resolvedUser, err := usersCache.Get(ctx, idKey)
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, resolvedUser.ID)
+	assert.Equal(t, user.Keys, resolvedUser.Keys)
+
+	// Verify: two-step lookup via each key-value pair
+	for key, value := range user.Keys {
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+
+		// Step 1: Get user ID from lookup key
+		userID, err := userLookupCache.Get(ctx, lookupKey)
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, userID, "Lookup key %s should resolve to user ID", lookupKey)
+
+		// Step 2: Get user from ID key
+		resolvedIDKey := userIDCacheKey(userID)
+		resolvedUser, err := usersCache.Get(ctx, resolvedIDKey)
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, resolvedUser.ID)
+		assert.Equal(t, user.Keys, resolvedUser.Keys)
+	}
+
+	// Verify the ID key is stored once, not per-lookup-key
+	allKeys, err := client.Keys(ctx, "schematic:user:*").Result()
+	require.NoError(t, err)
+
+	idKeyCount := 0
+	lookupKeyCount := 0
+	for _, k := range allKeys {
+		if k == idKey {
+			idKeyCount++
+		} else {
+			lookupKeyCount++
+		}
+	}
+	assert.Equal(t, 1, idKeyCount, "Should have exactly one ID-based key")
+	assert.Equal(t, len(user.Keys), lookupKeyCount, "Should have one lookup key per user key")
+}
+
+func TestUserDelete_IDBasedKeyspace_Integration(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	ctx := context.Background()
+	cacheTTL := 5 * time.Minute
+
+	usersCache := NewRedisBatchCache[*rulesengine.User](client, cacheTTL)
+	userLookupCache := NewRedisBatchCache[string](client, cacheTTL)
+
+	user := &rulesengine.User{
+		ID: "user_to_delete",
+		Keys: map[string]string{
+			"email":   "delete-me@test.com",
+			"user_id": "doomed-user",
+		},
+	}
+
+	// Write user with ID-based keyspace
+	idKey := userIDCacheKey(user.ID)
+	err = usersCache.Set(ctx, idKey, user, cacheTTL)
+	require.NoError(t, err)
+
+	var lookupKeys []string
+	for key, value := range user.Keys {
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+		lookupKeys = append(lookupKeys, lookupKey)
+		err = userLookupCache.Set(ctx, lookupKey, user.ID, cacheTTL)
+		require.NoError(t, err)
+	}
+
+	// Delete: ID key via usersCache, lookup keys via userLookupCache
+	err = usersCache.Delete(ctx, idKey)
+	require.NoError(t, err)
+
+	for _, lookupKey := range lookupKeys {
+		err = userLookupCache.Delete(ctx, lookupKey)
+		require.NoError(t, err)
+	}
+
+	// Verify all keys are gone
+	allKeys, err := client.Keys(ctx, "schematic:user:*").Result()
+	require.NoError(t, err)
+	assert.Equal(t, 0, len(allKeys), "All user keys should be deleted")
+}
+
+func TestBatchCacheUsers_IDBasedKeyspace_Integration(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	ctx := context.Background()
+	cacheTTL := 5 * time.Minute
+
+	usersCache := NewRedisBatchCache[*rulesengine.User](client, cacheTTL)
+	userLookupCache := NewRedisBatchCache[string](client, cacheTTL)
+
+	users := []*rulesengine.User{
+		{
+			ID:   "user_1",
+			Keys: map[string]string{"user_id": "alpha"},
+		},
+		{
+			ID:   "user_2",
+			Keys: map[string]string{"user_id": "beta", "email": "beta@test.com"},
+		},
+	}
+
+	// Build batch maps (same pattern as async_handler.go batchCacheUsers)
+	idItems := make(map[string]*rulesengine.User)
+	lookupItems := make(map[string]string)
+	for _, user := range users {
+		idItems[userIDCacheKey(user.ID)] = user
+		for key, value := range user.Keys {
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+			lookupItems[lookupKey] = user.ID
+		}
+	}
+
+	// BatchSet both maps
+	err = usersCache.BatchSet(ctx, idItems, cacheTTL)
+	require.NoError(t, err)
+	err = userLookupCache.BatchSet(ctx, lookupItems, cacheTTL)
+	require.NoError(t, err)
+
+	// Verify: 2 ID keys + 3 lookup keys = 5 total
+	allKeys, err := client.Keys(ctx, "schematic:user:*").Result()
+	require.NoError(t, err)
+	assert.Equal(t, 5, len(allKeys))
+
+	// Verify two-step resolution for each user
+	for _, user := range users {
+		for key, value := range user.Keys {
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+			userID, err := userLookupCache.Get(ctx, lookupKey)
+			require.NoError(t, err)
+			assert.Equal(t, user.ID, userID)
+
+			resolved, err := usersCache.Get(ctx, userIDCacheKey(userID))
+			require.NoError(t, err)
+			assert.Equal(t, user.ID, resolved.ID)
+		}
+	}
+}
+
 func TestBatchCacheCompanies_IDBasedKeyspace_Integration(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)

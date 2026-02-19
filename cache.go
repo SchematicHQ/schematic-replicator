@@ -32,6 +32,12 @@ func companyIDCacheKey(id string) string {
 	return fmt.Sprintf("%s:%s:%s:%s", cacheKeyPrefix, cacheKeyPrefixCompany, rulesengine.VersionKey, id)
 }
 
+// userIDCacheKey generates a cache key for a user by its ID
+// Format: schematic:user:{version}:{userID}
+func userIDCacheKey(id string) string {
+	return fmt.Sprintf("%s:%s:%s:%s", cacheKeyPrefix, cacheKeyPrefixUser, rulesengine.VersionKey, id)
+}
+
 // CacheProvider is a generic interface for caching operations
 type CacheProvider[T any] interface {
 	Get(ctx context.Context, key string) (T, error)
