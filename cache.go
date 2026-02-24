@@ -26,6 +26,18 @@ func resourceKeyToCacheKey(resourceType string, key string, value string) string
 	return fmt.Sprintf("%s:%s:%s:%s:%s", cacheKeyPrefix, resourceType, rulesengine.VersionKey, strings.ToLower(key), strings.ToLower(value))
 }
 
+// companyIDCacheKey generates a cache key for a company by its ID
+// Format: schematic:company:{version}:{companyID}
+func companyIDCacheKey(id string) string {
+	return fmt.Sprintf("%s:%s:%s:%s", cacheKeyPrefix, cacheKeyPrefixCompany, rulesengine.VersionKey, id)
+}
+
+// userIDCacheKey generates a cache key for a user by its ID
+// Format: schematic:user:{version}:{userID}
+func userIDCacheKey(id string) string {
+	return fmt.Sprintf("%s:%s:%s:%s", cacheKeyPrefix, cacheKeyPrefixUser, rulesengine.VersionKey, id)
+}
+
 // CacheProvider is a generic interface for caching operations
 type CacheProvider[T any] interface {
 	Get(ctx context.Context, key string) (T, error)
@@ -339,11 +351,8 @@ func (c *CacheCleanupManager) cleanupStaleEntries(ctx context.Context) error {
 	totalDeleted := 0
 
 	for _, p := range patterns {
-		// Create pattern to match stale entries (all except current version)
-		stalePattern := fmt.Sprintf("%s:%s:*", cacheKeyPrefix, p.name)
-
 		// Clean up stale entries for this cache type
-		deletedCount, err := c.deleteStaleKeysForCache(ctx, stalePattern, currentVersion)
+		deletedCount, err := c.deleteStaleKeysForCache(ctx, p.pattern, currentVersion)
 
 		if err != nil {
 			c.logger.Error(ctx, fmt.Sprintf("Failed to cleanup %s cache: %v", p.name, err))
@@ -404,7 +413,7 @@ func (c *CacheCleanupManager) deleteStaleKeysFromRedis(
 		// Filter keys to find stale ones (not matching current version)
 		for _, key := range keys {
 			parts := strings.Split(key, ":")
-			if len(parts) >= 3 {
+			if len(parts) >= 4 {
 				keyVersion := parts[2] // Version is the 3rd part: schematic:type:version:...
 				if keyVersion != currentVersion {
 					staleKeys = append(staleKeys, key)

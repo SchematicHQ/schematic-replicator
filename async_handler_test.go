@@ -123,10 +123,14 @@ func TestAsyncReplicatorMessageHandler_Creation(t *testing.T) {
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 		config := createTestAsyncConfig()
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -169,10 +173,14 @@ func TestAsyncReplicatorMessageHandler_MessageRouting(t *testing.T) {
 			mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 			config := createTestAsyncConfig()
 
+			mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+			mockUserLookupCache := NewMockBatchCacheProvider[string]()
 			handler := NewAsyncReplicatorMessageHandler(
 				mockCompanyCache,
 				mockUserCache,
 				mockFlagCache,
+				mockCompanyLookupCache,
+				mockUserLookupCache,
 				logger,
 				5*time.Minute,
 				config,
@@ -215,10 +223,14 @@ func TestAsyncReplicatorMessageHandler_CompanyBatchProcessing(t *testing.T) {
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 		config := createTestAsyncConfig()
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -233,16 +245,22 @@ func TestAsyncReplicatorMessageHandler_CompanyBatchProcessing(t *testing.T) {
 		companyData, err := json.Marshal(company)
 		require.NoError(t, err)
 
-		// Set up expectation for batch operation
-		// Use mock.MatchedBy to handle batch items
+		// Set up expectation for batch operation on ID keys
 		mockCompanyCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.Company) bool {
+			// Should contain exactly 1 ID key per unique company
+			idKey := companyIDCacheKey(company.ID)
+			comp, exists := items[idKey]
+			return exists && comp.ID == company.ID
+		}), 5*time.Minute).Return(nil)
+
+		// Set up expectation for batch operation on lookup keys
+		mockCompanyLookupCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]string) bool {
 			if len(items) != len(company.Keys) {
 				return false
 			}
-			// Check that all expected cache keys are present with correct company
 			for key, value := range company.Keys {
 				cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-				if comp, exists := items[cacheKey]; !exists || comp.ID != company.ID {
+				if id, exists := items[cacheKey]; !exists || id != company.ID {
 					return false
 				}
 			}
@@ -266,6 +284,7 @@ func TestAsyncReplicatorMessageHandler_CompanyBatchProcessing(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		mockCompanyCache.AssertExpectations(t)
+		mockCompanyLookupCache.AssertExpectations(t)
 	})
 
 	t.Run("handles company deletion messages", func(t *testing.T) {
@@ -275,10 +294,14 @@ func TestAsyncReplicatorMessageHandler_CompanyBatchProcessing(t *testing.T) {
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 		config := createTestAsyncConfig()
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -293,13 +316,22 @@ func TestAsyncReplicatorMessageHandler_CompanyBatchProcessing(t *testing.T) {
 		companyData, err := json.Marshal(company)
 		require.NoError(t, err)
 
-		// Set up expectation for batch delete operation
-		// Use mock.MatchedBy to handle non-deterministic order of keys
+		// Set up expectation for batch delete on ID keys
 		mockCompanyCache.On("BatchDelete", mock.Anything, mock.MatchedBy(func(keys []string) bool {
+			expectedIDKey := companyIDCacheKey(company.ID)
+			for _, key := range keys {
+				if key == expectedIDKey {
+					return true
+				}
+			}
+			return false
+		})).Return(nil)
+
+		// Set up expectation for batch delete on lookup keys
+		mockCompanyLookupCache.On("BatchDelete", mock.Anything, mock.MatchedBy(func(keys []string) bool {
 			if len(keys) != len(company.Keys) {
 				return false
 			}
-			// Check that all expected cache keys are present
 			expectedKeys := make(map[string]bool)
 			for key, value := range company.Keys {
 				cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
@@ -330,6 +362,7 @@ func TestAsyncReplicatorMessageHandler_CompanyBatchProcessing(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		mockCompanyCache.AssertExpectations(t)
+		mockCompanyLookupCache.AssertExpectations(t)
 	})
 }
 
@@ -341,10 +374,14 @@ func TestAsyncReplicatorMessageHandler_UserBatchProcessing(t *testing.T) {
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 		config := createTestAsyncConfig()
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -361,14 +398,24 @@ func TestAsyncReplicatorMessageHandler_UserBatchProcessing(t *testing.T) {
 
 		// Set up expectation for batch operation
 		// Use mock.MatchedBy to handle batch items
+		// Expect BatchSet on user cache with ID-based key (deduplicated)
 		mockUserCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.User) bool {
+			if len(items) != 1 {
+				return false
+			}
+			idKey := userIDCacheKey(user.ID)
+			u, exists := items[idKey]
+			return exists && u.ID == user.ID
+		}), 5*time.Minute).Return(nil)
+
+		// Expect BatchSet on user lookup cache with lookup keys pointing to user ID
+		mockUserLookupCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]string) bool {
 			if len(items) != len(user.Keys) {
 				return false
 			}
-			// Check that all expected cache keys are present with correct user
 			for key, value := range user.Keys {
-				cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-				if u, exists := items[cacheKey]; !exists || u.ID != user.ID {
+				lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+				if id, exists := items[lookupKey]; !exists || id != user.ID {
 					return false
 				}
 			}
@@ -392,6 +439,7 @@ func TestAsyncReplicatorMessageHandler_UserBatchProcessing(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		mockUserCache.AssertExpectations(t)
+		mockUserLookupCache.AssertExpectations(t)
 	})
 }
 
@@ -403,10 +451,14 @@ func TestAsyncReplicatorMessageHandler_FlagProcessing(t *testing.T) {
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 		config := createTestAsyncConfig()
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -448,10 +500,14 @@ func TestAsyncReplicatorMessageHandler_FlagProcessing(t *testing.T) {
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 		config := createTestAsyncConfig()
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -494,10 +550,14 @@ func TestAsyncReplicatorMessageHandler_FlagProcessing(t *testing.T) {
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 		config := createTestAsyncConfig()
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -549,10 +609,14 @@ func TestAsyncReplicatorMessageHandler_CircuitBreaker(t *testing.T) {
 		config.CircuitBreakerThreshold = 2
 		config.CircuitBreakerTimeout = 100 * time.Millisecond
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -601,10 +665,14 @@ func TestAsyncReplicatorMessageHandler_Metrics(t *testing.T) {
 		config := createTestAsyncConfig()
 		config.CompanyChannelSize = 1
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -625,8 +693,11 @@ func TestAsyncReplicatorMessageHandler_Metrics(t *testing.T) {
 			Data:        companyData,
 		}
 
-		// Set up mock expectation (message might be processed)
+		// Set up mock expectations (message might be processed)
 		mockCompanyCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.Company) bool {
+			return len(items) > 0
+		}), 5*time.Minute).Return(nil).Maybe()
+		mockCompanyLookupCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]string) bool {
 			return len(items) > 0
 		}), 5*time.Minute).Return(nil).Maybe()
 
@@ -654,10 +725,14 @@ func TestAsyncReplicatorMessageHandler_GracefulShutdown(t *testing.T) {
 		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
 		config := createTestAsyncConfig()
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -668,8 +743,11 @@ func TestAsyncReplicatorMessageHandler_GracefulShutdown(t *testing.T) {
 		companyData, err := json.Marshal(company)
 		require.NoError(t, err)
 
-		// Set up mock expectation
+		// Set up mock expectations
 		mockCompanyCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.Company) bool {
+			return len(items) > 0
+		}), 5*time.Minute).Return(nil).Maybe()
+		mockCompanyLookupCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]string) bool {
 			return len(items) > 0
 		}), 5*time.Minute).Return(nil).Maybe()
 
@@ -707,10 +785,14 @@ func TestAsyncReplicatorMessageHandler_GracefulShutdown(t *testing.T) {
 		config.NumWorkers = 10
 		config.BatchTimeout = 1 * time.Second // Longer batch timeout
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -741,10 +823,14 @@ func TestAsyncReplicatorMessageHandler_ConcurrentAccess(t *testing.T) {
 		config := createTestAsyncConfig()
 		config.CompanyChannelSize = 100 // Larger buffer for concurrency test
 
+		mockCompanyLookupCache := NewMockBatchCacheProvider[string]()
+		mockUserLookupCache := NewMockBatchCacheProvider[string]()
 		handler := NewAsyncReplicatorMessageHandler(
 			mockCompanyCache,
 			mockUserCache,
 			mockFlagCache,
+			mockCompanyLookupCache,
+			mockUserLookupCache,
 			logger,
 			5*time.Minute,
 			config,
@@ -767,7 +853,9 @@ func TestAsyncReplicatorMessageHandler_ConcurrentAccess(t *testing.T) {
 
 		// Set up mock expectations (may be called multiple times due to batching)
 		mockCompanyCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.Company) bool {
-			// Allow any valid batch set operation
+			return len(items) > 0
+		}), 5*time.Minute).Return(nil).Maybe()
+		mockCompanyLookupCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]string) bool {
 			return len(items) > 0
 		}), 5*time.Minute).Return(nil).Maybe()
 

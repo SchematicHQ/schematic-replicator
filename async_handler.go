@@ -122,14 +122,16 @@ type AsyncReplicatorMessageHandler struct {
 	redisCircuitBreaker *CircuitBreaker
 
 	// Original fields
-	companiesCache CacheProvider[*rulesengine.Company]
-	usersCache     CacheProvider[*rulesengine.User]
-	flagsCache     CacheProvider[*rulesengine.Flag]
-	companyMu      sync.RWMutex
-	userMu         sync.RWMutex
-	flagsMu        sync.RWMutex
-	logger         *SchematicLogger
-	cacheTTL       time.Duration
+	companiesCache     CacheProvider[*rulesengine.Company]
+	companyLookupCache BatchCacheProvider[string]
+	usersCache         CacheProvider[*rulesengine.User]
+	userLookupCache    BatchCacheProvider[string]
+	flagsCache         CacheProvider[*rulesengine.Flag]
+	companyMu          sync.RWMutex
+	userMu             sync.RWMutex
+	flagsMu            sync.RWMutex
+	logger             *SchematicLogger
+	cacheTTL           time.Duration
 
 	// Configuration
 	batchSize    int
@@ -173,6 +175,8 @@ func NewAsyncReplicatorMessageHandler(
 	companiesCache CacheProvider[*rulesengine.Company],
 	usersCache CacheProvider[*rulesengine.User],
 	flagsCache CacheProvider[*rulesengine.Flag],
+	companyLookupCache BatchCacheProvider[string],
+	userLookupCache BatchCacheProvider[string],
 	logger *SchematicLogger,
 	cacheTTL time.Duration,
 	config AsyncConfig,
@@ -184,13 +188,15 @@ func NewAsyncReplicatorMessageHandler(
 		userMsgChan:    make(chan *MessageJob, config.UserChannelSize),
 		flagsMsgChan:   make(chan *MessageJob, config.FlagsChannelSize),
 
-		numWorkers:     config.NumWorkers,
-		shutdown:       make(chan struct{}),
-		companiesCache: companiesCache,
-		usersCache:     usersCache,
-		flagsCache:     flagsCache,
-		logger:         logger,
-		cacheTTL:       cacheTTL,
+		numWorkers:         config.NumWorkers,
+		shutdown:           make(chan struct{}),
+		companiesCache:     companiesCache,
+		companyLookupCache: companyLookupCache,
+		usersCache:         usersCache,
+		userLookupCache:    userLookupCache,
+		flagsCache:         flagsCache,
+		logger:             logger,
+		cacheTTL:           cacheTTL,
 
 		batchSize:    config.BatchSize,
 		batchTimeout: config.BatchTimeout,
@@ -721,174 +727,230 @@ func (h *AsyncReplicatorMessageHandler) parseUserMessage(message *schematicdatas
 	return user, nil
 }
 
-// batchCacheCompanies caches multiple companies using batch operations when possible
+// batchCacheCompanies caches multiple companies using batch operations when possible.
+// Writes full company to ID keys and company ID strings to lookup keys.
 func (h *AsyncReplicatorMessageHandler) batchCacheCompanies(ctx context.Context, companies []*rulesengine.Company) error {
 	if len(companies) == 0 {
 		return nil
 	}
 
-	// Build batch of all cache keys and values
-	batchItems := make(map[string]*rulesengine.Company)
+	// Build batch maps for ID keys (full company) and lookup keys (company ID string)
+	idItems := make(map[string]*rulesengine.Company)
+	lookupItems := make(map[string]string)
 
 	for _, company := range companies {
 		if company == nil || len(company.Keys) == 0 {
 			continue
 		}
 
-		// Create cache entry for each key-value pair
+		// ID-based primary key -> full company
+		idKey := companyIDCacheKey(company.ID)
+		idItems[idKey] = company
+
+		// Versioned lookup keys -> company ID string
 		for key, value := range company.Keys {
-			cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-			batchItems[cacheKey] = company
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+			lookupItems[lookupKey] = company.ID
 		}
 	}
 
-	if len(batchItems) == 0 {
-		return nil
+	// Batch write ID keys
+	if len(idItems) > 0 {
+		if batchCache, ok := h.companiesCache.(BatchCacheProvider[*rulesengine.Company]); ok {
+			if err := batchCache.BatchSet(ctx, idItems, h.cacheTTL); err != nil {
+				return fmt.Errorf("batch set company ID keys: %w", err)
+			}
+		} else {
+			h.companyMu.Lock()
+			for cacheKey, company := range idItems {
+				if err := h.companiesCache.Set(ctx, cacheKey, company, h.cacheTTL); err != nil {
+					h.logger.Error(ctx, fmt.Sprintf("Failed to cache company ID key %s: %v", cacheKey, err))
+				}
+			}
+			h.companyMu.Unlock()
+		}
 	}
 
-	// Use Redis pipeline for batch operations if supported
-	if batchCache, ok := h.companiesCache.(BatchCacheProvider[*rulesengine.Company]); ok {
-		return batchCache.BatchSet(ctx, batchItems, h.cacheTTL)
-	}
-
-	// Fallback to individual operations if batch not supported
-	h.companyMu.Lock()
-	defer h.companyMu.Unlock()
-
-	for cacheKey, company := range batchItems {
-		if err := h.companiesCache.Set(ctx, cacheKey, company, h.cacheTTL); err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to cache company key %s: %v", cacheKey, err))
+	// Batch write lookup keys
+	if len(lookupItems) > 0 {
+		if err := h.companyLookupCache.BatchSet(ctx, lookupItems, h.cacheTTL); err != nil {
+			return fmt.Errorf("batch set company lookup keys: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// batchCacheUsers caches multiple users using batch operations when possible
+// batchCacheUsers caches multiple users using batch operations when possible.
+// Writes full user to ID keys and user ID strings to lookup keys.
 func (h *AsyncReplicatorMessageHandler) batchCacheUsers(ctx context.Context, users []*rulesengine.User) error {
 	if len(users) == 0 {
 		return nil
 	}
 
-	batchItems := make(map[string]*rulesengine.User)
+	// Build batch maps for ID keys (full user) and lookup keys (user ID string)
+	idItems := make(map[string]*rulesengine.User)
+	lookupItems := make(map[string]string)
 
 	for _, user := range users {
 		if user == nil || len(user.Keys) == 0 {
 			continue
 		}
 
+		// ID-based primary key -> full user
+		idKey := userIDCacheKey(user.ID)
+		idItems[idKey] = user
+
+		// Versioned lookup keys -> user ID string
 		for key, value := range user.Keys {
-			cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-			batchItems[cacheKey] = user
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+			lookupItems[lookupKey] = user.ID
 		}
 	}
 
-	if len(batchItems) == 0 {
-		return nil
+	// Batch write ID keys
+	if len(idItems) > 0 {
+		if batchCache, ok := h.usersCache.(BatchCacheProvider[*rulesengine.User]); ok {
+			if err := batchCache.BatchSet(ctx, idItems, h.cacheTTL); err != nil {
+				return fmt.Errorf("batch set user ID keys: %w", err)
+			}
+		} else {
+			h.userMu.Lock()
+			for cacheKey, user := range idItems {
+				if err := h.usersCache.Set(ctx, cacheKey, user, h.cacheTTL); err != nil {
+					h.logger.Error(ctx, fmt.Sprintf("Failed to cache user ID key %s: %v", cacheKey, err))
+				}
+			}
+			h.userMu.Unlock()
+		}
 	}
 
-	if batchCache, ok := h.usersCache.(BatchCacheProvider[*rulesengine.User]); ok {
-		return batchCache.BatchSet(ctx, batchItems, h.cacheTTL)
-	}
-
-	h.userMu.Lock()
-	defer h.userMu.Unlock()
-
-	for cacheKey, user := range batchItems {
-		if err := h.usersCache.Set(ctx, cacheKey, user, h.cacheTTL); err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to cache user key %s: %v", cacheKey, err))
+	// Batch write lookup keys
+	if len(lookupItems) > 0 {
+		if err := h.userLookupCache.BatchSet(ctx, lookupItems, h.cacheTTL); err != nil {
+			return fmt.Errorf("batch set user lookup keys: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// batchDeleteCompanies deletes multiple companies using batch operations when possible
+// batchDeleteCompanies deletes multiple companies using batch operations when possible.
+// Deletes both ID keys and lookup keys.
 func (h *AsyncReplicatorMessageHandler) batchDeleteCompanies(ctx context.Context, companies []*rulesengine.Company) error {
 	if len(companies) == 0 {
 		return nil
 	}
 
-	// Use a map to deduplicate keys
-	keysMap := make(map[string]bool)
+	// Collect ID keys and lookup keys separately
+	idKeysMap := make(map[string]bool)
+	lookupKeysMap := make(map[string]bool)
 
 	for _, company := range companies {
-		if company == nil || len(company.Keys) == 0 {
+		if company == nil {
 			continue
 		}
 
+		// ID-based primary key
+		idKeysMap[companyIDCacheKey(company.ID)] = true
+
+		// Versioned lookup keys
 		for key, value := range company.Keys {
-			cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-			keysMap[cacheKey] = true
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+			lookupKeysMap[lookupKey] = true
 		}
 	}
 
-	if len(keysMap) == 0 {
-		return nil
+	// Delete ID keys
+	if len(idKeysMap) > 0 {
+		idKeys := make([]string, 0, len(idKeysMap))
+		for key := range idKeysMap {
+			idKeys = append(idKeys, key)
+		}
+		if batchCache, ok := h.companiesCache.(BatchCacheProvider[*rulesengine.Company]); ok {
+			if err := batchCache.BatchDelete(ctx, idKeys); err != nil {
+				return fmt.Errorf("batch delete company ID keys: %w", err)
+			}
+		} else {
+			h.companyMu.Lock()
+			for _, k := range idKeys {
+				if err := h.companiesCache.Delete(ctx, k); err != nil {
+					h.logger.Warn(ctx, fmt.Sprintf("Failed to delete company ID key %s: %v", k, err))
+				}
+			}
+			h.companyMu.Unlock()
+		}
 	}
 
-	// Convert map keys to slice
-	keysToDelete := make([]string, 0, len(keysMap))
-	for key := range keysMap {
-		keysToDelete = append(keysToDelete, key)
-	}
-
-	if batchCache, ok := h.companiesCache.(BatchCacheProvider[*rulesengine.Company]); ok {
-		return batchCache.BatchDelete(ctx, keysToDelete)
-	}
-
-	h.companyMu.Lock()
-	defer h.companyMu.Unlock()
-
-	for _, cacheKey := range keysToDelete {
-		if err := h.companiesCache.Delete(ctx, cacheKey); err != nil {
-			h.logger.Warn(ctx, fmt.Sprintf("Failed to delete company key %s: %v", cacheKey, err))
+	// Delete lookup keys
+	if len(lookupKeysMap) > 0 {
+		lookupKeys := make([]string, 0, len(lookupKeysMap))
+		for key := range lookupKeysMap {
+			lookupKeys = append(lookupKeys, key)
+		}
+		if err := h.companyLookupCache.BatchDelete(ctx, lookupKeys); err != nil {
+			return fmt.Errorf("batch delete company lookup keys: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// batchDeleteUsers deletes multiple users using batch operations when possible
+// batchDeleteUsers deletes multiple users using batch operations when possible.
+// Deletes both ID keys and lookup keys.
 func (h *AsyncReplicatorMessageHandler) batchDeleteUsers(ctx context.Context, users []*rulesengine.User) error {
 	if len(users) == 0 {
 		return nil
 	}
 
-	// Use a map to deduplicate keys
-	keysMap := make(map[string]bool)
+	// Collect ID keys and lookup keys separately
+	idKeysMap := make(map[string]bool)
+	lookupKeysMap := make(map[string]bool)
 
 	for _, user := range users {
-		if user == nil || len(user.Keys) == 0 {
+		if user == nil {
 			continue
 		}
 
+		// ID-based primary key
+		idKeysMap[userIDCacheKey(user.ID)] = true
+
+		// Versioned lookup keys
 		for key, value := range user.Keys {
-			cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-			keysMap[cacheKey] = true
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+			lookupKeysMap[lookupKey] = true
 		}
 	}
 
-	if len(keysMap) == 0 {
-		return nil
+	// Delete ID keys
+	if len(idKeysMap) > 0 {
+		idKeys := make([]string, 0, len(idKeysMap))
+		for key := range idKeysMap {
+			idKeys = append(idKeys, key)
+		}
+		if batchCache, ok := h.usersCache.(BatchCacheProvider[*rulesengine.User]); ok {
+			if err := batchCache.BatchDelete(ctx, idKeys); err != nil {
+				return fmt.Errorf("batch delete user ID keys: %w", err)
+			}
+		} else {
+			h.userMu.Lock()
+			for _, k := range idKeys {
+				if err := h.usersCache.Delete(ctx, k); err != nil {
+					h.logger.Warn(ctx, fmt.Sprintf("Failed to delete user ID key %s: %v", k, err))
+				}
+			}
+			h.userMu.Unlock()
+		}
 	}
 
-	// Convert map keys to slice
-	keysToDelete := make([]string, 0, len(keysMap))
-	for key := range keysMap {
-		keysToDelete = append(keysToDelete, key)
-	}
-
-	if batchCache, ok := h.usersCache.(BatchCacheProvider[*rulesengine.User]); ok {
-		return batchCache.BatchDelete(ctx, keysToDelete)
-	}
-
-	h.userMu.Lock()
-	defer h.userMu.Unlock()
-
-	for _, cacheKey := range keysToDelete {
-		if err := h.usersCache.Delete(ctx, cacheKey); err != nil {
-			h.logger.Warn(ctx, fmt.Sprintf("Failed to delete user key %s: %v", cacheKey, err))
+	// Delete lookup keys
+	if len(lookupKeysMap) > 0 {
+		lookupKeys := make([]string, 0, len(lookupKeysMap))
+		for key := range lookupKeysMap {
+			lookupKeys = append(lookupKeys, key)
+		}
+		if err := h.userLookupCache.BatchDelete(ctx, lookupKeys); err != nil {
+			return fmt.Errorf("batch delete user lookup keys: %w", err)
 		}
 	}
 
@@ -996,12 +1058,14 @@ func (h *AsyncReplicatorMessageHandler) processSingleFlagMessage(ctx context.Con
 // AsyncInitialLoader provides asynchronous loading of companies and users
 // This allows the connection to be established quickly while data loads in the background
 type AsyncInitialLoader struct {
-	schematicClient *client.Client
-	companiesCache  CacheProvider[*rulesengine.Company]
-	usersCache      CacheProvider[*rulesengine.User]
-	logger          *SchematicLogger
-	cacheTTL        time.Duration
-	config          AsyncLoaderConfig
+	schematicClient    *client.Client
+	companiesCache     CacheProvider[*rulesengine.Company]
+	companyLookupCache CacheProvider[string]
+	usersCache         CacheProvider[*rulesengine.User]
+	userLookupCache    CacheProvider[string]
+	logger             *SchematicLogger
+	cacheTTL           time.Duration
+	config             AsyncLoaderConfig
 
 	// Circuit breaker for API calls
 	apiCircuitBreaker *CircuitBreaker
@@ -1134,23 +1198,27 @@ func DefaultAsyncLoaderConfig() AsyncLoaderConfig {
 func NewAsyncInitialLoader(
 	schematicClient *client.Client,
 	companiesCache CacheProvider[*rulesengine.Company],
+	companyLookupCache CacheProvider[string],
 	usersCache CacheProvider[*rulesengine.User],
+	userLookupCache CacheProvider[string],
 	logger *SchematicLogger,
 	cacheTTL time.Duration,
 	config AsyncLoaderConfig,
 ) *AsyncInitialLoader {
 	return &AsyncInitialLoader{
-		schematicClient:   schematicClient,
-		companiesCache:    companiesCache,
-		usersCache:        usersCache,
-		logger:            logger,
-		cacheTTL:          cacheTTL,
-		config:            config,
-		apiCircuitBreaker: NewCircuitBreaker(config.CircuitBreakerThreshold, config.CircuitBreakerTimeout),
-		rateLimiter:       NewRateLimiter(config.RateLimitRPS),
-		companiesLoadChan: make(chan struct{}),
-		usersLoadChan:     make(chan struct{}),
-		concurrencyLimit:  make(chan struct{}, config.MaxConcurrentRequests),
+		schematicClient:    schematicClient,
+		companiesCache:     companiesCache,
+		companyLookupCache: companyLookupCache,
+		usersCache:         usersCache,
+		userLookupCache:    userLookupCache,
+		logger:             logger,
+		cacheTTL:           cacheTTL,
+		config:             config,
+		apiCircuitBreaker:  NewCircuitBreaker(config.CircuitBreakerThreshold, config.CircuitBreakerTimeout),
+		rateLimiter:        NewRateLimiter(config.RateLimitRPS),
+		companiesLoadChan:  make(chan struct{}),
+		usersLoadChan:      make(chan struct{}),
+		concurrencyLimit:   make(chan struct{}, config.MaxConcurrentRequests),
 	}
 }
 
@@ -1395,7 +1463,7 @@ func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error
 	}()
 
 	// Process results and cache companies
-	var allCacheKeys []string
+	var allLookupKeys []string
 	processedCount := 0
 
 	for result := range results {
@@ -1412,7 +1480,10 @@ func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error
 				if cacheErr != nil {
 					al.logger.Error(ctx, fmt.Sprintf("Cache error for company %s key '%s': %v", company.ID, cacheKey, cacheErr))
 				} else {
-					allCacheKeys = append(allCacheKeys, cacheKey)
+					// Track lookup keys (not ID keys) for eviction
+					if cacheKey != companyIDCacheKey(company.ID) {
+						allLookupKeys = append(allLookupKeys, cacheKey)
+					}
 				}
 			}
 		}
@@ -1421,10 +1492,10 @@ func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error
 		al.logger.Debug(ctx, fmt.Sprintf("Processed companies page at offset %d (%d companies)", result.offset, len(result.data)))
 	}
 
-	// Evict missing keys
-	if len(allCacheKeys) > 0 {
-		if err := al.companiesCache.DeleteMissing(ctx, allCacheKeys); err != nil {
-			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company cache keys: %v", err))
+	// Evict missing lookup keys
+	if len(allLookupKeys) > 0 {
+		if err := al.companyLookupCache.DeleteMissing(ctx, allLookupKeys); err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company lookup keys: %v", err))
 		}
 	}
 
@@ -1538,7 +1609,7 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 	}()
 
 	// Process results and cache users
-	var allCacheKeys []string
+	var allLookupKeys []string
 	processedCount := 0
 
 	for result := range results {
@@ -1555,7 +1626,10 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 				if cacheErr != nil {
 					al.logger.Error(ctx, fmt.Sprintf("Cache error for user %s key '%s': %v", user.ID, cacheKey, cacheErr))
 				} else {
-					allCacheKeys = append(allCacheKeys, cacheKey)
+					// Track lookup keys (not ID keys) for eviction
+					if cacheKey != userIDCacheKey(user.ID) {
+						allLookupKeys = append(allLookupKeys, cacheKey)
+					}
 				}
 			}
 		}
@@ -1564,10 +1638,10 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 		al.logger.Debug(ctx, fmt.Sprintf("Processed users page at offset %d (%d users)", result.offset, len(result.data)))
 	}
 
-	// Evict missing keys
-	if len(allCacheKeys) > 0 {
-		if err := al.usersCache.DeleteMissing(ctx, allCacheKeys); err != nil {
-			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user cache keys: %v", err))
+	// Evict missing lookup keys
+	if len(allLookupKeys) > 0 {
+		if err := al.userLookupCache.DeleteMissing(ctx, allLookupKeys); err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user lookup keys: %v", err))
 		}
 	}
 
@@ -1576,7 +1650,8 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 	return nil
 }
 
-// cacheCompanyForKeys caches a company for all its key combinations (matching existing implementation)
+// cacheCompanyForKeys caches a company using ID-based deduplicated keyspace.
+// Writes the full company to the ID key and the company ID string to each lookup key.
 func (al *AsyncInitialLoader) cacheCompanyForKeys(ctx context.Context, company *rulesengine.Company) map[string]error {
 	if company == nil || len(company.Keys) == 0 {
 		return nil
@@ -1584,16 +1659,21 @@ func (al *AsyncInitialLoader) cacheCompanyForKeys(ctx context.Context, company *
 
 	cacheResults := make(map[string]error)
 
+	// Write full company to ID-based primary key
+	idKey := companyIDCacheKey(company.ID)
+	cacheResults[idKey] = al.companiesCache.Set(ctx, idKey, company, al.cacheTTL)
+
+	// Write company ID string to each versioned lookup key
 	for key, value := range company.Keys {
-		companyKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-		err := al.companiesCache.Set(ctx, companyKey, company, al.cacheTTL)
-		cacheResults[companyKey] = err
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+		cacheResults[lookupKey] = al.companyLookupCache.Set(ctx, lookupKey, company.ID, al.cacheTTL)
 	}
 
 	return cacheResults
 }
 
-// cacheUserForKeys caches a user for all its key combinations (matching existing implementation)
+// cacheUserForKeys caches a user using ID-based deduplicated keyspace.
+// Writes the full user to the ID key and the user ID string to each lookup key.
 func (al *AsyncInitialLoader) cacheUserForKeys(ctx context.Context, user *rulesengine.User) map[string]error {
 	if user == nil || len(user.Keys) == 0 {
 		return nil
@@ -1601,10 +1681,14 @@ func (al *AsyncInitialLoader) cacheUserForKeys(ctx context.Context, user *rulese
 
 	cacheResults := make(map[string]error)
 
+	// Write full user to ID-based primary key
+	idKey := userIDCacheKey(user.ID)
+	cacheResults[idKey] = al.usersCache.Set(ctx, idKey, user, al.cacheTTL)
+
+	// Write user ID string to each versioned lookup key
 	for key, value := range user.Keys {
-		userKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-		err := al.usersCache.Set(ctx, userKey, user, al.cacheTTL)
-		cacheResults[userKey] = err
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+		cacheResults[lookupKey] = al.userLookupCache.Set(ctx, lookupKey, user.ID, al.cacheTTL)
 	}
 
 	return cacheResults
@@ -1612,14 +1696,16 @@ func (al *AsyncInitialLoader) cacheUserForKeys(ctx context.Context, user *rulese
 
 // AsyncConnectionReadyHandler implements the ConnectionReadyHandler interface for asynchronous loading
 type AsyncConnectionReadyHandler struct {
-	schematicClient *client.Client
-	wsClient        *schematicdatastreamws.Client
-	companiesCache  CacheProvider[*rulesengine.Company]
-	usersCache      CacheProvider[*rulesengine.User]
-	flagsCache      CacheProvider[*rulesengine.Flag]
-	logger          *SchematicLogger
-	cacheTTL        time.Duration
-	asyncLoader     *AsyncInitialLoader
+	schematicClient    *client.Client
+	wsClient           *schematicdatastreamws.Client
+	companiesCache     CacheProvider[*rulesengine.Company]
+	companyLookupCache CacheProvider[string]
+	usersCache         CacheProvider[*rulesengine.User]
+	userLookupCache    CacheProvider[string]
+	flagsCache         CacheProvider[*rulesengine.Flag]
+	logger             *SchematicLogger
+	cacheTTL           time.Duration
+	asyncLoader        *AsyncInitialLoader
 }
 
 // NewAsyncConnectionReadyHandler creates a new async connection ready handler
@@ -1629,6 +1715,8 @@ func NewAsyncConnectionReadyHandler(
 	companiesCache CacheProvider[*rulesengine.Company],
 	usersCache CacheProvider[*rulesengine.User],
 	flagsCache CacheProvider[*rulesengine.Flag],
+	companyLookupCache CacheProvider[string],
+	userLookupCache CacheProvider[string],
 	logger *SchematicLogger,
 	cacheTTL time.Duration,
 	asyncLoaderConfig AsyncLoaderConfig,
@@ -1636,21 +1724,25 @@ func NewAsyncConnectionReadyHandler(
 	asyncLoader := NewAsyncInitialLoader(
 		schematicClient,
 		companiesCache,
+		companyLookupCache,
 		usersCache,
+		userLookupCache,
 		logger,
 		cacheTTL,
 		asyncLoaderConfig,
 	)
 
 	return &AsyncConnectionReadyHandler{
-		schematicClient: schematicClient,
-		wsClient:        wsClient,
-		companiesCache:  companiesCache,
-		usersCache:      usersCache,
-		flagsCache:      flagsCache,
-		logger:          logger,
-		cacheTTL:        cacheTTL,
-		asyncLoader:     asyncLoader,
+		schematicClient:    schematicClient,
+		wsClient:           wsClient,
+		companiesCache:     companiesCache,
+		companyLookupCache: companyLookupCache,
+		usersCache:         usersCache,
+		userLookupCache:    userLookupCache,
+		flagsCache:         flagsCache,
+		logger:             logger,
+		cacheTTL:           cacheTTL,
+		asyncLoader:        asyncLoader,
 	}
 }
 

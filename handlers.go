@@ -16,11 +16,13 @@ import (
 
 // ReplicatorMessageHandler implements the MessageHandler interface
 type ReplicatorMessageHandler struct {
-	logger         *SchematicLogger
-	companiesCache CacheProvider[*rulesengine.Company]
-	usersCache     CacheProvider[*rulesengine.User]
-	flagsCache     CacheProvider[*rulesengine.Flag]
-	cacheTTL       time.Duration
+	logger             *SchematicLogger
+	companiesCache     CacheProvider[*rulesengine.Company]
+	companyLookupCache CacheProvider[string]
+	usersCache         CacheProvider[*rulesengine.User]
+	userLookupCache    CacheProvider[string]
+	flagsCache         CacheProvider[*rulesengine.Flag]
+	cacheTTL           time.Duration
 
 	// Mutexes for cache operations (matching schematic-go pattern)
 	flagsMu   sync.RWMutex
@@ -32,16 +34,20 @@ type ReplicatorMessageHandler struct {
 func NewReplicatorMessageHandler(
 	logger *SchematicLogger,
 	companiesCache CacheProvider[*rulesengine.Company],
+	companyLookupCache CacheProvider[string],
 	usersCache CacheProvider[*rulesengine.User],
+	userLookupCache CacheProvider[string],
 	flagsCache CacheProvider[*rulesengine.Flag],
 	cacheTTL time.Duration,
 ) *ReplicatorMessageHandler {
 	return &ReplicatorMessageHandler{
-		logger:         logger,
-		companiesCache: companiesCache,
-		usersCache:     usersCache,
-		flagsCache:     flagsCache,
-		cacheTTL:       cacheTTL,
+		logger:             logger,
+		companiesCache:     companiesCache,
+		companyLookupCache: companyLookupCache,
+		usersCache:         usersCache,
+		userLookupCache:    userLookupCache,
+		flagsCache:         flagsCache,
+		cacheTTL:           cacheTTL,
 	}
 }
 
@@ -255,12 +261,18 @@ func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, mes
 			return nil
 		}
 
-		// Delete company from cache for all keys (matching schematic-go behavior)
+		// Delete company from cache: ID key + all lookup keys
 		h.companyMu.Lock()
+		// Delete the ID-based primary key
+		idKey := companyIDCacheKey(company.ID)
+		if err := h.companiesCache.Delete(ctx, idKey); err != nil {
+			h.logger.Warn(ctx, fmt.Sprintf("Failed to delete company ID key '%s': %v", idKey, err))
+		}
+		// Delete all lookup keys
 		for key, value := range company.Keys {
 			companyKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-			if err := h.companiesCache.Delete(ctx, companyKey); err != nil {
-				h.logger.Warn(ctx, fmt.Sprintf("Failed to delete company from cache for key '%s': %v", companyKey, err))
+			if err := h.companyLookupCache.Delete(ctx, companyKey); err != nil {
+				h.logger.Warn(ctx, fmt.Sprintf("Failed to delete company lookup key '%s': %v", companyKey, err))
 			}
 		}
 		h.companyMu.Unlock()
@@ -271,41 +283,45 @@ func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, mes
 	return nil
 }
 
-// Helper method to cache company for all keys (matching schematic-go pattern)
+// Helper method to cache company for all keys using ID-based deduplicated keyspace.
+// Writes the full company to the ID key and the company ID string to each lookup key.
 func (h *ReplicatorMessageHandler) cacheCompanyForKeys(ctx context.Context, company *rulesengine.Company) map[string]error {
 	if company == nil || len(company.Keys) == 0 {
 		return nil
 	}
 
-	// Map to track which cache keys were successfully cached and which ones failed
 	cacheResults := make(map[string]error)
 
-	// Try to cache the company for all keys
+	// Write full company to ID-based primary key
+	idKey := companyIDCacheKey(company.ID)
+	cacheResults[idKey] = h.companiesCache.Set(ctx, idKey, company, h.cacheTTL)
+
+	// Write company ID string to each versioned lookup key
 	for key, value := range company.Keys {
-		companyKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-		err := h.companiesCache.Set(ctx, companyKey, company, h.cacheTTL)
-		// Store the result for each cache key
-		cacheResults[companyKey] = err
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+		cacheResults[lookupKey] = h.companyLookupCache.Set(ctx, lookupKey, company.ID, h.cacheTTL)
 	}
 
 	return cacheResults
 }
 
-// Helper method to cache user for all keys (matching schematic-go pattern)
+// Helper method to cache user for all keys using ID-based deduplicated keyspace.
+// Writes the full user to the ID key and the user ID string to each lookup key.
 func (h *ReplicatorMessageHandler) cacheUserForKeys(ctx context.Context, user *rulesengine.User) map[string]error {
 	if user == nil || len(user.Keys) == 0 {
 		return nil
 	}
 
-	// Map to track which cache keys were successfully cached and which ones failed
 	cacheResults := make(map[string]error)
 
-	// Try to cache the user for all keys
+	// Write full user to ID-based primary key
+	idKey := userIDCacheKey(user.ID)
+	cacheResults[idKey] = h.usersCache.Set(ctx, idKey, user, h.cacheTTL)
+
+	// Write user ID string to each versioned lookup key
 	for key, value := range user.Keys {
-		userKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-		err := h.usersCache.Set(ctx, userKey, user, h.cacheTTL)
-		// Store the result for each cache key
-		cacheResults[userKey] = err
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+		cacheResults[lookupKey] = h.userLookupCache.Set(ctx, lookupKey, user.ID, h.cacheTTL)
 	}
 
 	return cacheResults
@@ -354,12 +370,18 @@ func (h *ReplicatorMessageHandler) handleUserMessage(ctx context.Context, messag
 			return nil
 		}
 
-		// Delete user from cache for all keys (matching schematic-go behavior)
+		// Delete user from cache: ID key + all lookup keys
 		h.userMu.Lock()
+		// Delete the ID-based primary key
+		idKey := userIDCacheKey(user.ID)
+		if err := h.usersCache.Delete(ctx, idKey); err != nil {
+			h.logger.Warn(ctx, fmt.Sprintf("Failed to delete user ID key '%s': %v", idKey, err))
+		}
+		// Delete all lookup keys
 		for key, value := range user.Keys {
 			userKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-			if err := h.usersCache.Delete(ctx, userKey); err != nil {
-				h.logger.Warn(ctx, fmt.Sprintf("Failed to delete user from cache for key '%s': %v", userKey, err))
+			if err := h.userLookupCache.Delete(ctx, userKey); err != nil {
+				h.logger.Warn(ctx, fmt.Sprintf("Failed to delete user lookup key '%s': %v", userKey, err))
 			}
 		}
 		h.userMu.Unlock()
@@ -408,13 +430,15 @@ func (h *ReplicatorMessageHandler) handleUsersMessage(ctx context.Context, messa
 
 // ConnectionReadyHandler implements the ConnectionReadyHandler interface for synchronous loading
 type ConnectionReadyHandler struct {
-	schematicClient *client.Client
-	wsClient        *schematicdatastreamws.Client
-	companiesCache  CacheProvider[*rulesengine.Company]
-	usersCache      CacheProvider[*rulesengine.User]
-	flagsCache      CacheProvider[*rulesengine.Flag]
-	logger          *SchematicLogger
-	cacheTTL        time.Duration
+	schematicClient    *client.Client
+	wsClient           *schematicdatastreamws.Client
+	companiesCache     CacheProvider[*rulesengine.Company]
+	companyLookupCache CacheProvider[string]
+	usersCache         CacheProvider[*rulesengine.User]
+	userLookupCache    CacheProvider[string]
+	flagsCache         CacheProvider[*rulesengine.Flag]
+	logger             *SchematicLogger
+	cacheTTL           time.Duration
 }
 
 // NewConnectionReadyHandler creates a new connection ready handler with synchronous loading (default)
@@ -424,17 +448,21 @@ func NewConnectionReadyHandler(
 	companiesCache CacheProvider[*rulesengine.Company],
 	usersCache CacheProvider[*rulesengine.User],
 	flagsCache CacheProvider[*rulesengine.Flag],
+	companyLookupCache CacheProvider[string],
+	userLookupCache CacheProvider[string],
 	logger *SchematicLogger,
 	cacheTTL time.Duration,
 ) *ConnectionReadyHandler {
 	return &ConnectionReadyHandler{
-		schematicClient: schematicClient,
-		wsClient:        wsClient,
-		companiesCache:  companiesCache,
-		usersCache:      usersCache,
-		flagsCache:      flagsCache,
-		logger:          logger,
-		cacheTTL:        cacheTTL,
+		schematicClient:    schematicClient,
+		wsClient:           wsClient,
+		companiesCache:     companiesCache,
+		companyLookupCache: companyLookupCache,
+		usersCache:         usersCache,
+		userLookupCache:    userLookupCache,
+		flagsCache:         flagsCache,
+		logger:             logger,
+		cacheTTL:           cacheTTL,
 	}
 }
 
@@ -478,7 +506,7 @@ func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) erro
 	pageSize := 100
 	offset := 0
 	totalCompanies := 0
-	var allCacheKeys []string // Track all successfully cached keys for eviction
+	var allLookupKeys []string // Track all successfully cached lookup keys for eviction
 
 	for {
 		h.logger.Debug(ctx, fmt.Sprintf("Fetching companies page: offset=%d, limit=%d", offset, pageSize))
@@ -501,17 +529,16 @@ func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) erro
 
 			h.logger.Debug(ctx, fmt.Sprintf("Company %s has %d keys: %v", company.ID, len(company.Keys), company.Keys))
 
-			// Cache the company with all its key-value pairs (matching schematic-go behavior)
+			// Cache the company using ID-based keyspace
 			cacheResults := h.cacheCompanyForKeys(ctx, company)
 			for cacheKey, cacheErr := range cacheResults {
 				if cacheErr != nil {
 					h.logger.Error(ctx, fmt.Sprintf("Cache error for company %s key '%s': %v", company.ID, cacheKey, cacheErr))
 				} else {
 					h.logger.Debug(ctx, fmt.Sprintf("Successfully cached company key '%s'", cacheKey))
-					allCacheKeys = append(allCacheKeys, cacheKey) // Track successfully cached keys
-					// Additional debug: verify the key exists immediately
-					if _, err := h.companiesCache.Get(ctx, cacheKey); err != nil {
-						h.logger.Error(ctx, fmt.Sprintf("Key '%s' not found immediately after caching: %v", cacheKey, err))
+					// Track lookup keys (not ID keys) for eviction
+					if cacheKey != companyIDCacheKey(company.ID) {
+						allLookupKeys = append(allLookupKeys, cacheKey)
 					}
 				}
 			}
@@ -535,13 +562,13 @@ func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) erro
 		offset += pageSize
 	}
 
-	// Evict any cached company keys that are not present in the retrieved dataset
-	if len(allCacheKeys) > 0 {
-		h.logger.Debug(ctx, fmt.Sprintf("Evicting missing company cache keys (keeping %d keys)", len(allCacheKeys)))
-		if err := h.companiesCache.DeleteMissing(ctx, allCacheKeys); err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company cache keys: %v", err))
+	// Evict any cached company lookup keys that are not present in the retrieved dataset
+	if len(allLookupKeys) > 0 {
+		h.logger.Debug(ctx, fmt.Sprintf("Evicting missing company lookup keys (keeping %d keys)", len(allLookupKeys)))
+		if err := h.companyLookupCache.DeleteMissing(ctx, allLookupKeys); err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company lookup keys: %v", err))
 		} else {
-			h.logger.Debug(ctx, "Successfully evicted missing company cache keys")
+			h.logger.Debug(ctx, "Successfully evicted missing company lookup keys")
 		}
 	}
 
@@ -555,7 +582,7 @@ func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 	pageSize := 100
 	offset := 0
 	totalUsers := 0
-	var allCacheKeys []string // Track all successfully cached keys for eviction
+	var allLookupKeys []string // Track all successfully cached lookup keys for eviction
 
 	for {
 		h.logger.Debug(ctx, fmt.Sprintf("Fetching users page: offset=%d, limit=%d", offset, pageSize))
@@ -578,14 +605,17 @@ func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 
 			h.logger.Debug(ctx, fmt.Sprintf("User %s has %d keys: %v", user.ID, len(user.Keys), user.Keys))
 
-			// Cache the user with all its key-value pairs (matching schematic-go behavior)
+			// Cache the user using ID-based keyspace
 			cacheResults := h.cacheUserForKeys(ctx, user)
 			for cacheKey, cacheErr := range cacheResults {
 				if cacheErr != nil {
 					h.logger.Error(ctx, fmt.Sprintf("Cache error for user %s key '%s': %v", user.ID, cacheKey, cacheErr))
 				} else {
 					h.logger.Debug(ctx, fmt.Sprintf("Successfully cached user key '%s'", cacheKey))
-					allCacheKeys = append(allCacheKeys, cacheKey) // Track successfully cached keys
+					// Track lookup keys (not ID keys) for eviction
+					if cacheKey != userIDCacheKey(user.ID) {
+						allLookupKeys = append(allLookupKeys, cacheKey)
+					}
 				}
 			}
 
@@ -608,13 +638,13 @@ func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 		offset += pageSize
 	}
 
-	// Evict any cached user keys that are not present in the retrieved dataset
-	if len(allCacheKeys) > 0 {
-		h.logger.Debug(ctx, fmt.Sprintf("Evicting missing user cache keys (keeping %d keys)", len(allCacheKeys)))
-		if err := h.usersCache.DeleteMissing(ctx, allCacheKeys); err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user cache keys: %v", err))
+	// Evict any cached user lookup keys that are not present in the retrieved dataset
+	if len(allLookupKeys) > 0 {
+		h.logger.Debug(ctx, fmt.Sprintf("Evicting missing user lookup keys (keeping %d keys)", len(allLookupKeys)))
+		if err := h.userLookupCache.DeleteMissing(ctx, allLookupKeys); err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user lookup keys: %v", err))
 		} else {
-			h.logger.Debug(ctx, "Successfully evicted missing user cache keys")
+			h.logger.Debug(ctx, "Successfully evicted missing user lookup keys")
 		}
 	}
 
@@ -679,10 +709,14 @@ func (h *ConnectionReadyHandler) cacheCompanyForKeys(ctx context.Context, compan
 
 	cacheResults := make(map[string]error)
 
+	// Write full company to ID-based primary key
+	idKey := companyIDCacheKey(company.ID)
+	cacheResults[idKey] = h.companiesCache.Set(ctx, idKey, company, h.cacheTTL)
+
+	// Write company ID string to each versioned lookup key
 	for key, value := range company.Keys {
-		companyKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-		err := h.companiesCache.Set(ctx, companyKey, company, h.cacheTTL)
-		cacheResults[companyKey] = err
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+		cacheResults[lookupKey] = h.companyLookupCache.Set(ctx, lookupKey, company.ID, h.cacheTTL)
 	}
 
 	return cacheResults
@@ -695,10 +729,14 @@ func (h *ConnectionReadyHandler) cacheUserForKeys(ctx context.Context, user *rul
 
 	cacheResults := make(map[string]error)
 
+	// Write full user to ID-based primary key
+	idKey := userIDCacheKey(user.ID)
+	cacheResults[idKey] = h.usersCache.Set(ctx, idKey, user, h.cacheTTL)
+
+	// Write user ID string to each versioned lookup key
 	for key, value := range user.Keys {
-		userKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-		err := h.usersCache.Set(ctx, userKey, user, h.cacheTTL)
-		cacheResults[userKey] = err
+		lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+		cacheResults[lookupKey] = h.userLookupCache.Set(ctx, lookupKey, user.ID, h.cacheTTL)
 	}
 
 	return cacheResults
