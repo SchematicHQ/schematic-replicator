@@ -1464,6 +1464,7 @@ func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error
 
 	// Process results and cache companies
 	var allLookupKeys []string
+	var allIDKeys []string
 	processedCount := 0
 
 	for result := range results {
@@ -1480,8 +1481,10 @@ func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error
 				if cacheErr != nil {
 					al.logger.Error(ctx, fmt.Sprintf("Cache error for company %s key '%s': %v", company.ID, cacheKey, cacheErr))
 				} else {
-					// Track lookup keys (not ID keys) for eviction
-					if cacheKey != companyIDCacheKey(company.ID) {
+					// Track lookup keys and ID keys separately for eviction
+					if cacheKey == companyIDCacheKey(company.ID) {
+						allIDKeys = append(allIDKeys, cacheKey)
+					} else {
 						allLookupKeys = append(allLookupKeys, cacheKey)
 					}
 				}
@@ -1496,6 +1499,13 @@ func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error
 	if len(allLookupKeys) > 0 {
 		if err := al.companyLookupCache.DeleteMissing(ctx, allLookupKeys); err != nil {
 			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company lookup keys: %v", err))
+		}
+	}
+
+	// Evict missing ID keys
+	if len(allIDKeys) > 0 {
+		if err := al.companiesCache.DeleteMissing(ctx, allIDKeys); err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company ID keys: %v", err))
 		}
 	}
 
@@ -1610,6 +1620,7 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 
 	// Process results and cache users
 	var allLookupKeys []string
+	var allIDKeys []string
 	processedCount := 0
 
 	for result := range results {
@@ -1626,8 +1637,10 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 				if cacheErr != nil {
 					al.logger.Error(ctx, fmt.Sprintf("Cache error for user %s key '%s': %v", user.ID, cacheKey, cacheErr))
 				} else {
-					// Track lookup keys (not ID keys) for eviction
-					if cacheKey != userIDCacheKey(user.ID) {
+					// Track lookup keys and ID keys separately for eviction
+					if cacheKey == userIDCacheKey(user.ID) {
+						allIDKeys = append(allIDKeys, cacheKey)
+					} else {
 						allLookupKeys = append(allLookupKeys, cacheKey)
 					}
 				}
@@ -1642,6 +1655,13 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 	if len(allLookupKeys) > 0 {
 		if err := al.userLookupCache.DeleteMissing(ctx, allLookupKeys); err != nil {
 			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user lookup keys: %v", err))
+		}
+	}
+
+	// Evict missing ID keys
+	if len(allIDKeys) > 0 {
+		if err := al.usersCache.DeleteMissing(ctx, allIDKeys); err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user ID keys: %v", err))
 		}
 	}
 

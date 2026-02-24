@@ -507,6 +507,7 @@ func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) erro
 	offset := 0
 	totalCompanies := 0
 	var allLookupKeys []string // Track all successfully cached lookup keys for eviction
+	var allIDKeys []string     // Track all successfully cached ID keys for eviction
 
 	for {
 		h.logger.Debug(ctx, fmt.Sprintf("Fetching companies page: offset=%d, limit=%d", offset, pageSize))
@@ -536,8 +537,10 @@ func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) erro
 					h.logger.Error(ctx, fmt.Sprintf("Cache error for company %s key '%s': %v", company.ID, cacheKey, cacheErr))
 				} else {
 					h.logger.Debug(ctx, fmt.Sprintf("Successfully cached company key '%s'", cacheKey))
-					// Track lookup keys (not ID keys) for eviction
-					if cacheKey != companyIDCacheKey(company.ID) {
+					// Track lookup keys and ID keys separately for eviction
+					if cacheKey == companyIDCacheKey(company.ID) {
+						allIDKeys = append(allIDKeys, cacheKey)
+					} else {
 						allLookupKeys = append(allLookupKeys, cacheKey)
 					}
 				}
@@ -572,6 +575,16 @@ func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) erro
 		}
 	}
 
+	// Evict any cached company ID keys that are not present in the retrieved dataset
+	if len(allIDKeys) > 0 {
+		h.logger.Debug(ctx, fmt.Sprintf("Evicting missing company ID keys (keeping %d keys)", len(allIDKeys)))
+		if err := h.companiesCache.DeleteMissing(ctx, allIDKeys); err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to evict missing company ID keys: %v", err))
+		} else {
+			h.logger.Debug(ctx, "Successfully evicted missing company ID keys")
+		}
+	}
+
 	h.logger.Info(ctx, fmt.Sprintf("Successfully cached %d companies across all pages", totalCompanies))
 	return nil
 }
@@ -583,6 +596,7 @@ func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 	offset := 0
 	totalUsers := 0
 	var allLookupKeys []string // Track all successfully cached lookup keys for eviction
+	var allIDKeys []string     // Track all successfully cached ID keys for eviction
 
 	for {
 		h.logger.Debug(ctx, fmt.Sprintf("Fetching users page: offset=%d, limit=%d", offset, pageSize))
@@ -612,8 +626,10 @@ func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 					h.logger.Error(ctx, fmt.Sprintf("Cache error for user %s key '%s': %v", user.ID, cacheKey, cacheErr))
 				} else {
 					h.logger.Debug(ctx, fmt.Sprintf("Successfully cached user key '%s'", cacheKey))
-					// Track lookup keys (not ID keys) for eviction
-					if cacheKey != userIDCacheKey(user.ID) {
+					// Track lookup keys and ID keys separately for eviction
+					if cacheKey == userIDCacheKey(user.ID) {
+						allIDKeys = append(allIDKeys, cacheKey)
+					} else {
 						allLookupKeys = append(allLookupKeys, cacheKey)
 					}
 				}
@@ -645,6 +661,16 @@ func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 			h.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user lookup keys: %v", err))
 		} else {
 			h.logger.Debug(ctx, "Successfully evicted missing user lookup keys")
+		}
+	}
+
+	// Evict any cached user ID keys that are not present in the retrieved dataset
+	if len(allIDKeys) > 0 {
+		h.logger.Debug(ctx, fmt.Sprintf("Evicting missing user ID keys (keeping %d keys)", len(allIDKeys)))
+		if err := h.usersCache.DeleteMissing(ctx, allIDKeys); err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to evict missing user ID keys: %v", err))
+		} else {
+			h.logger.Debug(ctx, "Successfully evicted missing user ID keys")
 		}
 	}
 
