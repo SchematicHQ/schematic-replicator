@@ -131,18 +131,20 @@ func (r *redisCache[T]) DeleteMissing(ctx context.Context, keys []string) error 
 	// Extract pattern from first key to match entity type and version
 	// For cache keys like "schematic:flags:34717044:flag_key", we want "schematic:flags:34717044:*"
 	// For cache keys like "schematic:company:34717044:key:value", we want "schematic:company:34717044:*"
-	pattern := ""
-	if len(keys) > 0 {
-		parts := strings.Split(keys[0], ":")
-		if len(parts) >= 3 {
-			// Build pattern: prefix:entityType:version:*
-			pattern = strings.Join(parts[:3], ":") + ":*"
-		}
-	}
-
-	if pattern == "" {
+	parts := strings.Split(keys[0], ":")
+	if len(parts) < 3 {
 		return nil
 	}
+
+	// Build pattern: prefix:entityType:version:*
+	pattern := strings.Join(parts[:3], ":") + ":*"
+
+	// Track the segment count of the input keys so we only compare keys of the
+	// same shape. For example, lookup keys have 5 segments
+	// (schematic:company:version:key:value) while ID-based keys have 4
+	// (schematic:company:version:id). When called with lookup keys we must not
+	// delete ID-based keys and vice versa.
+	expectedSegments := len(parts)
 
 	// Get all existing keys matching the pattern
 	existingKeys, err := r.client.Keys(ctx, pattern).Result()
@@ -156,9 +158,12 @@ func (r *redisCache[T]) DeleteMissing(ctx context.Context, keys []string) error 
 		keepKeys[key] = true
 	}
 
-	// Find keys to delete
+	// Find keys to delete, only considering keys with the same number of segments
 	var keysToDelete []string
 	for _, existingKey := range existingKeys {
+		if len(strings.Split(existingKey, ":")) != expectedSegments {
+			continue
+		}
 		if !keepKeys[existingKey] {
 			keysToDelete = append(keysToDelete, existingKey)
 		}

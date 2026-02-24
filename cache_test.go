@@ -138,7 +138,7 @@ func splitCacheKey(key string) []string {
 	return parts
 }
 
-func TestDeleteStaleKeysFromRedis_SkipsIDBasedKeys(t *testing.T) {
+func TestCleanupStaleEntries_DeletesAllOldVersionKeys(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	defer mr.Close()
@@ -149,60 +149,91 @@ func TestDeleteStaleKeysFromRedis_SkipsIDBasedKeys(t *testing.T) {
 	ctx := context.Background()
 
 	currentVersion := rulesengine.VersionKey
-	oldVersion := "old_version_12345"
+	oldVersionA := "old_version_aaa"
+	oldVersionB := "old_version_bbb"
 
-	// Populate Redis with various key types:
-	// 1. Current version lookup key (should be kept)
-	currentLookupKey := fmt.Sprintf("schematic:company:%s:domain:test.com", currentVersion)
-	client.Set(ctx, currentLookupKey, `"comp_abc123"`, 0)
+	// --- Populate Redis with current + stale keys across all three entity types ---
 
-	// 2. Old version lookup key (should be deleted)
-	oldLookupKey := fmt.Sprintf("schematic:company:%s:domain:test.com", oldVersion)
-	client.Set(ctx, oldLookupKey, `"comp_abc123"`, 0)
+	// Flags: current version (keep)
+	currentFlagKey := fmt.Sprintf("schematic:flags:%s:my_flag", currentVersion)
+	client.Set(ctx, currentFlagKey, `{"key":"my_flag"}`, 0)
+	// Flags: old version A (delete)
+	oldFlagKeyA := fmt.Sprintf("schematic:flags:%s:my_flag", oldVersionA)
+	client.Set(ctx, oldFlagKeyA, `{"key":"my_flag"}`, 0)
+	// Flags: old version B (delete)
+	oldFlagKeyB := fmt.Sprintf("schematic:flags:%s:other_flag", oldVersionB)
+	client.Set(ctx, oldFlagKeyB, `{"key":"other_flag"}`, 0)
 
-	// 3. Current version ID-based key (should be kept)
-	idKey := fmt.Sprintf("schematic:company:%s:comp_abc123", currentVersion)
-	client.Set(ctx, idKey, `{"id":"comp_abc123"}`, 0)
+	// Companies: current version lookup key (keep)
+	currentCompanyLookup := fmt.Sprintf("schematic:company:%s:domain:test.com", currentVersion)
+	client.Set(ctx, currentCompanyLookup, `"comp_1"`, 0)
+	// Companies: current version ID key (keep)
+	currentCompanyID := fmt.Sprintf("schematic:company:%s:comp_1", currentVersion)
+	client.Set(ctx, currentCompanyID, `{"id":"comp_1"}`, 0)
+	// Companies: old version lookup key (delete)
+	oldCompanyLookup := fmt.Sprintf("schematic:company:%s:domain:test.com", oldVersionA)
+	client.Set(ctx, oldCompanyLookup, `"comp_1"`, 0)
+	// Companies: old version ID key (delete)
+	oldCompanyID := fmt.Sprintf("schematic:company:%s:comp_1", oldVersionB)
+	client.Set(ctx, oldCompanyID, `{"id":"comp_1"}`, 0)
 
-	// 4. Old version ID-based key (should be deleted)
-	oldIDKey := fmt.Sprintf("schematic:company:%s:comp_abc123", oldVersion)
-	client.Set(ctx, oldIDKey, `{"id":"comp_abc123"}`, 0)
+	// Users: current version lookup key (keep)
+	currentUserLookup := fmt.Sprintf("schematic:user:%s:email:alice@test.com", currentVersion)
+	client.Set(ctx, currentUserLookup, `"user_1"`, 0)
+	// Users: current version ID key (keep)
+	currentUserID := fmt.Sprintf("schematic:user:%s:user_1", currentVersion)
+	client.Set(ctx, currentUserID, `{"id":"user_1"}`, 0)
+	// Users: old version lookup key (delete)
+	oldUserLookup := fmt.Sprintf("schematic:user:%s:email:alice@test.com", oldVersionA)
+	client.Set(ctx, oldUserLookup, `"user_1"`, 0)
+	// Users: old version ID key (delete)
+	oldUserID := fmt.Sprintf("schematic:user:%s:user_1", oldVersionA)
+	client.Set(ctx, oldUserID, `{"id":"user_1"}`, 0)
 
-	// Verify all keys exist
-	keys, err := client.Keys(ctx, "schematic:company:*").Result()
+	// Verify initial state: 11 total keys
+	allKeys, err := client.Keys(ctx, "schematic:*").Result()
 	require.NoError(t, err)
-	assert.Equal(t, 4, len(keys))
+	assert.Equal(t, 11, len(allKeys), "Should have 11 total keys before cleanup")
 
-	// Run the cleanup
+	// --- Run the full cleanupStaleEntries flow ---
 	logger := &mockLogger{}
 	flagsCache := NewRedisCache[*rulesengine.Flag](client, 0)
 	companiesCache := NewRedisCache[*rulesengine.Company](client, 0)
 	usersCache := NewRedisCache[*rulesengine.User](client, 0)
 	cleanupManager := NewCacheCleanupManager(flagsCache, companiesCache, usersCache, logger, 1*time.Hour)
 
-	deletedCount, err := cleanupManager.deleteStaleKeysFromRedis(
-		ctx, client, "schematic:company:*", currentVersion,
-	)
+	err = cleanupManager.cleanupStaleEntries(ctx)
 	require.NoError(t, err)
 
-	// Both old version keys should be deleted
-	assert.Equal(t, 2, deletedCount, "Should delete both old version keys")
+	// --- Assert: all current-version keys kept ---
+	for _, key := range []string{
+		currentFlagKey,
+		currentCompanyLookup,
+		currentCompanyID,
+		currentUserLookup,
+		currentUserID,
+	} {
+		exists := client.Exists(ctx, key).Val()
+		assert.Equal(t, int64(1), exists, "Current version key should be kept: %s", key)
+	}
 
-	// Verify current version lookup key still exists
-	exists := client.Exists(ctx, currentLookupKey).Val()
-	assert.Equal(t, int64(1), exists, "Current version lookup key should still exist")
+	// --- Assert: all old-version keys deleted ---
+	for _, key := range []string{
+		oldFlagKeyA,
+		oldFlagKeyB,
+		oldCompanyLookup,
+		oldCompanyID,
+		oldUserLookup,
+		oldUserID,
+	} {
+		exists := client.Exists(ctx, key).Val()
+		assert.Equal(t, int64(0), exists, "Old version key should be deleted: %s", key)
+	}
 
-	// Verify current version ID-based key still exists
-	exists = client.Exists(ctx, idKey).Val()
-	assert.Equal(t, int64(1), exists, "Current version ID-based key should still exist")
-
-	// Verify old version lookup key was deleted
-	exists = client.Exists(ctx, oldLookupKey).Val()
-	assert.Equal(t, int64(0), exists, "Old version lookup key should be deleted")
-
-	// Verify old version ID-based key was deleted
-	exists = client.Exists(ctx, oldIDKey).Val()
-	assert.Equal(t, int64(0), exists, "Old version ID-based key should be deleted")
+	// Final state: only 5 current-version keys remain
+	allKeys, err = client.Keys(ctx, "schematic:*").Result()
+	require.NoError(t, err)
+	assert.Equal(t, 5, len(allKeys), "Should have 5 current-version keys after cleanup")
 }
 
 func TestCompanyIDBasedCaching_Integration(t *testing.T) {
@@ -574,6 +605,182 @@ func TestBatchCacheUsers_IDBasedKeyspace_Integration(t *testing.T) {
 			assert.Equal(t, user.ID, resolved.ID)
 		}
 	}
+}
+
+func TestDeleteMissing_LookupKeysDoNotDeleteIDKeys(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	ctx := context.Background()
+	cacheTTL := 5 * time.Minute
+	version := rulesengine.VersionKey
+
+	companiesCache := NewRedisBatchCache[*rulesengine.Company](client, cacheTTL)
+	companyLookupCache := NewRedisBatchCache[string](client, cacheTTL)
+
+	// --- Setup: simulate initial load with 2 companies ---
+	companyA := &rulesengine.Company{
+		ID:   "comp_a",
+		Keys: map[string]string{"domain": "a.com", "company_id": "alpha"},
+	}
+	companyB := &rulesengine.Company{
+		ID:   "comp_b",
+		Keys: map[string]string{"domain": "b.com"},
+	}
+
+	// Cache both companies (ID keys + lookup keys)
+	for _, company := range []*rulesengine.Company{companyA, companyB} {
+		idKey := companyIDCacheKey(company.ID)
+		err = companiesCache.Set(ctx, idKey, company, cacheTTL)
+		require.NoError(t, err)
+		for key, value := range company.Keys {
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+			err = companyLookupCache.Set(ctx, lookupKey, company.ID, cacheTTL)
+			require.NoError(t, err)
+		}
+	}
+
+	// Also add a stale lookup key (company that no longer exists)
+	staleLookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, "domain", "gone.com")
+	err = companyLookupCache.Set(ctx, staleLookupKey, "comp_gone", cacheTTL)
+	require.NoError(t, err)
+
+	// Also add a stale ID key (company that no longer exists)
+	staleIDKey := companyIDCacheKey("comp_gone")
+	err = companiesCache.Set(ctx, staleIDKey, &rulesengine.Company{ID: "comp_gone"}, cacheTTL)
+	require.NoError(t, err)
+
+	// Verify initial state: 3 ID keys + 4 lookup keys = 7 total
+	allKeys, err := client.Keys(ctx, fmt.Sprintf("schematic:company:%s:*", version)).Result()
+	require.NoError(t, err)
+	assert.Equal(t, 7, len(allKeys), "Should have 7 total keys before eviction")
+
+	// --- Act: DeleteMissing with only the current lookup keys (simulating re-load) ---
+	currentLookupKeys := []string{
+		resourceKeyToCacheKey(cacheKeyPrefixCompany, "domain", "a.com"),
+		resourceKeyToCacheKey(cacheKeyPrefixCompany, "company_id", "alpha"),
+		resourceKeyToCacheKey(cacheKeyPrefixCompany, "domain", "b.com"),
+	}
+	err = companyLookupCache.DeleteMissing(ctx, currentLookupKeys)
+	require.NoError(t, err)
+
+	// --- Assert: stale lookup key deleted, ALL ID keys preserved ---
+	// The stale lookup key should be gone
+	exists := client.Exists(ctx, staleLookupKey).Val()
+	assert.Equal(t, int64(0), exists, "Stale lookup key should be deleted")
+
+	// All current lookup keys should still exist
+	for _, key := range currentLookupKeys {
+		exists = client.Exists(ctx, key).Val()
+		assert.Equal(t, int64(1), exists, "Current lookup key should still exist: %s", key)
+	}
+
+	// ALL ID keys should still exist (including the stale one — lookup eviction must not touch ID keys)
+	for _, id := range []string{"comp_a", "comp_b", "comp_gone"} {
+		idKey := companyIDCacheKey(id)
+		exists = client.Exists(ctx, idKey).Val()
+		assert.Equal(t, int64(1), exists, "ID key should still exist after lookup eviction: %s", idKey)
+	}
+
+	// --- Act: Now DeleteMissing with only the current ID keys ---
+	currentIDKeys := []string{
+		companyIDCacheKey("comp_a"),
+		companyIDCacheKey("comp_b"),
+	}
+	err = companiesCache.DeleteMissing(ctx, currentIDKeys)
+	require.NoError(t, err)
+
+	// --- Assert: stale ID key deleted, current ID keys and all lookup keys preserved ---
+	exists = client.Exists(ctx, staleIDKey).Val()
+	assert.Equal(t, int64(0), exists, "Stale ID key should be deleted")
+
+	for _, key := range currentIDKeys {
+		exists = client.Exists(ctx, key).Val()
+		assert.Equal(t, int64(1), exists, "Current ID key should still exist: %s", key)
+	}
+
+	for _, key := range currentLookupKeys {
+		exists = client.Exists(ctx, key).Val()
+		assert.Equal(t, int64(1), exists, "Lookup key should still exist after ID eviction: %s", key)
+	}
+
+	// Final state: 2 ID keys + 3 lookup keys = 5 total
+	allKeys, err = client.Keys(ctx, fmt.Sprintf("schematic:company:%s:*", version)).Result()
+	require.NoError(t, err)
+	assert.Equal(t, 5, len(allKeys), "Should have 5 total keys after both evictions")
+}
+
+func TestDeleteMissing_UserKeysFollowSamePattern(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	ctx := context.Background()
+	cacheTTL := 5 * time.Minute
+
+	usersCache := NewRedisBatchCache[*rulesengine.User](client, cacheTTL)
+	userLookupCache := NewRedisBatchCache[string](client, cacheTTL)
+
+	// Setup: one current user + one stale user
+	currentUser := &rulesengine.User{
+		ID:   "user_current",
+		Keys: map[string]string{"email": "current@test.com"},
+	}
+	staleUser := &rulesengine.User{
+		ID:   "user_stale",
+		Keys: map[string]string{"email": "stale@test.com"},
+	}
+
+	for _, user := range []*rulesengine.User{currentUser, staleUser} {
+		idKey := userIDCacheKey(user.ID)
+		err = usersCache.Set(ctx, idKey, user, cacheTTL)
+		require.NoError(t, err)
+		for key, value := range user.Keys {
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+			err = userLookupCache.Set(ctx, lookupKey, user.ID, cacheTTL)
+			require.NoError(t, err)
+		}
+	}
+
+	// Evict lookup keys — only keep currentUser's
+	currentLookupKeys := []string{
+		resourceKeyToCacheKey(cacheKeyPrefixUser, "email", "current@test.com"),
+	}
+	err = userLookupCache.DeleteMissing(ctx, currentLookupKeys)
+	require.NoError(t, err)
+
+	// Stale lookup key should be gone
+	staleLookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, "email", "stale@test.com")
+	exists := client.Exists(ctx, staleLookupKey).Val()
+	assert.Equal(t, int64(0), exists, "Stale user lookup key should be deleted")
+
+	// Both ID keys should still exist
+	for _, id := range []string{"user_current", "user_stale"} {
+		exists = client.Exists(ctx, userIDCacheKey(id)).Val()
+		assert.Equal(t, int64(1), exists, "User ID key should survive lookup eviction: %s", id)
+	}
+
+	// Evict ID keys — only keep currentUser's
+	currentIDKeys := []string{userIDCacheKey("user_current")}
+	err = usersCache.DeleteMissing(ctx, currentIDKeys)
+	require.NoError(t, err)
+
+	// Stale ID key should be gone
+	exists = client.Exists(ctx, userIDCacheKey("user_stale")).Val()
+	assert.Equal(t, int64(0), exists, "Stale user ID key should be deleted")
+
+	// Current user's ID key and lookup key should still exist
+	exists = client.Exists(ctx, userIDCacheKey("user_current")).Val()
+	assert.Equal(t, int64(1), exists, "Current user ID key should still exist")
+	exists = client.Exists(ctx, currentLookupKeys[0]).Val()
+	assert.Equal(t, int64(1), exists, "Current user lookup key should still exist")
 }
 
 func TestBatchCacheCompanies_IDBasedKeyspace_Integration(t *testing.T) {
