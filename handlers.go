@@ -779,6 +779,7 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 		Traits:            make([]*rulesengine.Trait, 0),
 		BillingProductIDs: make([]string, 0),
 		PlanIDs:           make([]string, 0),
+		PlanVersionIDs:    make([]string, 0),
 		CreditBalances:    make(map[string]float64),
 		Metrics:           make([]*rulesengine.CompanyMetric, 0),
 		Rules:             make([]*rulesengine.Rule, 0),
@@ -796,6 +797,16 @@ func convertToRulesEngineCompany(data *schematicgo.CompanyDetailResponseData) *r
 
 	if data.Plan != nil && data.Plan.ID != "" {
 		company.BasePlanID = &data.Plan.ID
+	}
+
+	if data.Plan != nil && data.Plan.PlanVersionID != nil && *data.Plan.PlanVersionID != "" {
+		company.PlanVersionIDs = append(company.PlanVersionIDs, *data.Plan.PlanVersionID)
+	}
+
+	for _, addOn := range data.AddOns {
+		if addOn != nil && addOn.PlanVersionID != nil && *addOn.PlanVersionID != "" {
+			company.PlanVersionIDs = append(company.PlanVersionIDs, *addOn.PlanVersionID)
+		}
 	}
 
 	if data.BillingSubscriptions != nil {
