@@ -11,6 +11,8 @@ require (
 	github.com/stretchr/testify v1.11.1
 )
 
+replace github.com/schematichq/schematic-go => ../schematic-go
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

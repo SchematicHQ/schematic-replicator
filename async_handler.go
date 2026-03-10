@@ -11,6 +11,7 @@ import (
 	schematicdatastreamws "github.com/schematichq/schematic-datastream-ws"
 	schematicgo "github.com/schematichq/schematic-go"
 	"github.com/schematichq/schematic-go/client"
+	"github.com/schematichq/schematic-go/merge"
 )
 
 // CircuitBreakerState represents the state of a circuit breaker
@@ -565,37 +566,49 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 	}
 
 	// Group operations by type for better batching
-	var creates []*rulesengine.Company
+	var fulls []*rulesengine.Company
+	var partials []*MessageJob
 	var deletes []*rulesengine.Company
 
 	for _, job := range jobs {
-		company, err := h.parseCompanyMessage(job.Message)
-		if err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to parse company message: %v", err))
-			continue
-		}
-
-		if company == nil {
-			continue
-		}
-
 		switch job.Message.MessageType {
-		case schematicdatastreamws.MessageTypeFull, schematicdatastreamws.MessageTypePartial:
-			creates = append(creates, company)
+		case schematicdatastreamws.MessageTypeFull:
+			company, err := h.parseCompanyMessage(job.Message)
+			if err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to parse company message: %v", err))
+				continue
+			}
+			if company != nil {
+				fulls = append(fulls, company)
+			}
+		case schematicdatastreamws.MessageTypePartial:
+			partials = append(partials, job)
 		case schematicdatastreamws.MessageTypeDelete:
-			deletes = append(deletes, company)
+			company, err := h.parseCompanyMessage(job.Message)
+			if err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to parse company message: %v", err))
+				continue
+			}
+			if company != nil {
+				deletes = append(deletes, company)
+			}
 		}
 	}
 
-	// Batch create operations
-	if len(creates) > 0 {
-		if err := h.batchCacheCompanies(ctx, creates); err != nil {
+	// Batch full create/update operations
+	if len(fulls) > 0 {
+		if err := h.batchCacheCompanies(ctx, fulls); err != nil {
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch company cache failed: %v", err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
-			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d companies", len(creates)))
+			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d companies", len(fulls)))
 		}
+	}
+
+	// Process partial updates individually (read-modify-write)
+	if len(partials) > 0 {
+		h.processPartialCompanyMessages(ctx, partials)
 	}
 
 	// Batch delete operations
@@ -621,36 +634,48 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 		return
 	}
 
-	var creates []*rulesengine.User
+	var fulls []*rulesengine.User
+	var partials []*MessageJob
 	var deletes []*rulesengine.User
 
 	for _, job := range jobs {
-		user, err := h.parseUserMessage(job.Message)
-		if err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to parse user message: %v", err))
-			continue
-		}
-
-		if user == nil {
-			continue
-		}
-
 		switch job.Message.MessageType {
-		case schematicdatastreamws.MessageTypeFull, schematicdatastreamws.MessageTypePartial:
-			creates = append(creates, user)
+		case schematicdatastreamws.MessageTypeFull:
+			user, err := h.parseUserMessage(job.Message)
+			if err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to parse user message: %v", err))
+				continue
+			}
+			if user != nil {
+				fulls = append(fulls, user)
+			}
+		case schematicdatastreamws.MessageTypePartial:
+			partials = append(partials, job)
 		case schematicdatastreamws.MessageTypeDelete:
-			deletes = append(deletes, user)
+			user, err := h.parseUserMessage(job.Message)
+			if err != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to parse user message: %v", err))
+				continue
+			}
+			if user != nil {
+				deletes = append(deletes, user)
+			}
 		}
 	}
 
-	if len(creates) > 0 {
-		if err := h.batchCacheUsers(ctx, creates); err != nil {
+	if len(fulls) > 0 {
+		if err := h.batchCacheUsers(ctx, fulls); err != nil {
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch user cache failed: %v", err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
-			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d users", len(creates)))
+			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d users", len(fulls)))
 		}
+	}
+
+	// Process partial updates individually (read-modify-write)
+	if len(partials) > 0 {
+		h.processPartialUserMessages(ctx, partials)
 	}
 
 	if len(deletes) > 0 {
@@ -662,6 +687,110 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d users", len(deletes)))
 		}
 	}
+}
+
+// processPartialCompanyMessages handles partial company updates individually via read-modify-write.
+func (h *AsyncReplicatorMessageHandler) processPartialCompanyMessages(ctx context.Context, jobs []*MessageJob) {
+	for _, job := range jobs {
+		id, err := merge.ExtractIDFromJSON(job.Message.Data)
+		if err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to extract company ID from partial message: %v", err))
+			continue
+		}
+
+		company, err := h.parseCompanyMessage(job.Message)
+		if err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to parse partial company message: %v", err))
+			continue
+		}
+		if company == nil {
+			continue
+		}
+
+		h.companyMu.Lock()
+		existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(id))
+		if existErr == nil && existing != nil {
+			merged, mergeErr := merge.PartialCompany(existing, job.Message.Data)
+			if mergeErr != nil {
+				h.companyMu.Unlock()
+				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company '%s': %v", id, mergeErr))
+				continue
+			}
+			company = merged
+		} else {
+			h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial company '%s', writing as-is", id))
+		}
+
+		idKey := companyIDCacheKey(company.ID)
+		if err := h.companiesCache.Set(ctx, idKey, company, h.cacheTTL); err != nil {
+			h.companyMu.Unlock()
+			h.redisCircuitBreaker.RecordFailure()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to cache partial company '%s': %v", id, err))
+			continue
+		}
+		for key, value := range company.Keys {
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+			if err := h.companyLookupCache.Set(ctx, lookupKey, company.ID, h.cacheTTL); err != nil {
+				h.logger.Warn(ctx, fmt.Sprintf("Failed to cache company lookup key '%s': %v", lookupKey, err))
+			}
+		}
+		h.companyMu.Unlock()
+		h.redisCircuitBreaker.RecordSuccess()
+	}
+
+	h.logger.Debug(ctx, fmt.Sprintf("Processed %d partial company messages", len(jobs)))
+}
+
+// processPartialUserMessages handles partial user updates individually via read-modify-write.
+func (h *AsyncReplicatorMessageHandler) processPartialUserMessages(ctx context.Context, jobs []*MessageJob) {
+	for _, job := range jobs {
+		id, err := merge.ExtractIDFromJSON(job.Message.Data)
+		if err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to extract user ID from partial message: %v", err))
+			continue
+		}
+
+		user, err := h.parseUserMessage(job.Message)
+		if err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to parse partial user message: %v", err))
+			continue
+		}
+		if user == nil {
+			continue
+		}
+
+		h.userMu.Lock()
+		existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(id))
+		if existErr == nil && existing != nil {
+			merged, mergeErr := merge.PartialUser(existing, job.Message.Data)
+			if mergeErr != nil {
+				h.userMu.Unlock()
+				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user '%s': %v", id, mergeErr))
+				continue
+			}
+			user = merged
+		} else {
+			h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial user '%s', writing as-is", id))
+		}
+
+		idKey := userIDCacheKey(user.ID)
+		if err := h.usersCache.Set(ctx, idKey, user, h.cacheTTL); err != nil {
+			h.userMu.Unlock()
+			h.redisCircuitBreaker.RecordFailure()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to cache partial user '%s': %v", id, err))
+			continue
+		}
+		for key, value := range user.Keys {
+			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+			if err := h.userLookupCache.Set(ctx, lookupKey, user.ID, h.cacheTTL); err != nil {
+				h.logger.Warn(ctx, fmt.Sprintf("Failed to cache user lookup key '%s': %v", lookupKey, err))
+			}
+		}
+		h.userMu.Unlock()
+		h.redisCircuitBreaker.RecordSuccess()
+	}
+
+	h.logger.Debug(ctx, fmt.Sprintf("Processed %d partial user messages", len(jobs)))
 }
 
 // processBatchedFlagsMessages processes a batch of flags messages with circuit breaker

@@ -28,8 +28,6 @@ github.com/schematichq/rulesengine v0.1.14 h1:lCBfBwxxvsF9OkcPrnP6c1y4hGAHEzr3ac
 github.com/schematichq/rulesengine v0.1.14/go.mod h1:HmweBgjg+kVe6VuNMLc7FISHFF0wzr5cVGLAxlVP8+4=
 github.com/schematichq/schematic-datastream-ws v0.2.7 h1:8dTVii0ALVTlO3lcR2tnGePBLSrmMYVTjy6QB+g8TVQ=
 github.com/schematichq/schematic-datastream-ws v0.2.7/go.mod h1:NKrg326C9YfCDOI84On5GZhvrovzDpFCzW8wdBwPZ3g=
-github.com/schematichq/schematic-go v1.4.3 h1:OPVYx9XzNg/9+nwbUZAiZzKIsUeuPcSY2PPMDYnbt0o=
-github.com/schematichq/schematic-go v1.4.3/go.mod h1:E9KEzNmmRebEraW7rYDC1tPysUCpoKIO9yU3lsDeonA=
 github.com/stretchr/objx v0.5.2 h1:xuMeJ0Sdp5ZMRXx/aWO6RZxdr3beISkG5/G/aIRr3pY=
 github.com/stretchr/objx v0.5.2/go.mod h1:FRsXN1f5AsAjCGJKqEizvkpNtU+EGNCLh3NxZ/8L+MA=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
