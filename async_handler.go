@@ -11,7 +11,7 @@ import (
 	schematicdatastreamws "github.com/schematichq/schematic-datastream-ws"
 	schematicgo "github.com/schematichq/schematic-go"
 	"github.com/schematichq/schematic-go/client"
-	"github.com/schematichq/schematic-go/merge"
+	"github.com/schematichq/schematic-go/datastream"
 )
 
 // CircuitBreakerState represents the state of a circuit breaker
@@ -692,7 +692,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 // processPartialCompanyMessages handles partial company updates individually via read-modify-write.
 func (h *AsyncReplicatorMessageHandler) processPartialCompanyMessages(ctx context.Context, jobs []*MessageJob) {
 	for _, job := range jobs {
-		id, err := merge.ExtractIDFromJSON(job.Message.Data)
+		id, err := datastream.ExtractIDFromJSON(job.Message.Data)
 		if err != nil {
 			h.logger.Error(ctx, fmt.Sprintf("Failed to extract company ID from partial message: %v", err))
 			continue
@@ -710,7 +710,7 @@ func (h *AsyncReplicatorMessageHandler) processPartialCompanyMessages(ctx contex
 		h.companyMu.Lock()
 		existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(id))
 		if existErr == nil && existing != nil {
-			merged, mergeErr := merge.PartialCompany(existing, job.Message.Data)
+			merged, mergeErr := datastream.PartialCompany(existing, job.Message.Data)
 			if mergeErr != nil {
 				h.companyMu.Unlock()
 				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company '%s': %v", id, mergeErr))
@@ -744,7 +744,7 @@ func (h *AsyncReplicatorMessageHandler) processPartialCompanyMessages(ctx contex
 // processPartialUserMessages handles partial user updates individually via read-modify-write.
 func (h *AsyncReplicatorMessageHandler) processPartialUserMessages(ctx context.Context, jobs []*MessageJob) {
 	for _, job := range jobs {
-		id, err := merge.ExtractIDFromJSON(job.Message.Data)
+		id, err := datastream.ExtractIDFromJSON(job.Message.Data)
 		if err != nil {
 			h.logger.Error(ctx, fmt.Sprintf("Failed to extract user ID from partial message: %v", err))
 			continue
@@ -762,7 +762,7 @@ func (h *AsyncReplicatorMessageHandler) processPartialUserMessages(ctx context.C
 		h.userMu.Lock()
 		existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(id))
 		if existErr == nil && existing != nil {
-			merged, mergeErr := merge.PartialUser(existing, job.Message.Data)
+			merged, mergeErr := datastream.PartialUser(existing, job.Message.Data)
 			if mergeErr != nil {
 				h.userMu.Unlock()
 				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user '%s': %v", id, mergeErr))

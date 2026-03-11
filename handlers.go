@@ -12,7 +12,7 @@ import (
 	schematicdatastreamws "github.com/schematichq/schematic-datastream-ws"
 	schematicgo "github.com/schematichq/schematic-go"
 	"github.com/schematichq/schematic-go/client"
-	"github.com/schematichq/schematic-go/merge"
+	"github.com/schematichq/schematic-go/datastream"
 )
 
 // ReplicatorMessageHandler implements the MessageHandler interface
@@ -248,7 +248,7 @@ func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, mes
 		}
 
 	case schematicdatastreamws.MessageTypePartial:
-		id, err := merge.ExtractIDFromJSON(message.Data)
+		id, err := datastream.ExtractIDFromJSON(message.Data)
 		if err != nil {
 			h.logger.Error(ctx, fmt.Sprintf("Failed to extract company ID from partial message: %v", err))
 			return err
@@ -267,7 +267,7 @@ func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, mes
 		h.companyMu.Lock()
 		existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(id))
 		if existErr == nil && existing != nil {
-			merged, mergeErr := merge.PartialCompany(existing, message.Data)
+			merged, mergeErr := datastream.PartialCompany(existing, message.Data)
 			if mergeErr != nil {
 				h.companyMu.Unlock()
 				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company: %v", mergeErr))
@@ -397,7 +397,7 @@ func (h *ReplicatorMessageHandler) handleUserMessage(ctx context.Context, messag
 		}
 
 	case schematicdatastreamws.MessageTypePartial:
-		id, err := merge.ExtractIDFromJSON(message.Data)
+		id, err := datastream.ExtractIDFromJSON(message.Data)
 		if err != nil {
 			h.logger.Error(ctx, fmt.Sprintf("Failed to extract user ID from partial message: %v", err))
 			return err
@@ -416,7 +416,7 @@ func (h *ReplicatorMessageHandler) handleUserMessage(ctx context.Context, messag
 		h.userMu.Lock()
 		existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(id))
 		if existErr == nil && existing != nil {
-			merged, mergeErr := merge.PartialUser(existing, message.Data)
+			merged, mergeErr := datastream.PartialUser(existing, message.Data)
 			if mergeErr != nil {
 				h.userMu.Unlock()
 				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user: %v", mergeErr))
