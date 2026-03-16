@@ -48,6 +48,37 @@ func (m *MockCacheProvider[T]) DeleteByPattern(ctx context.Context, pattern stri
 	return args.Int(0), args.Error(1)
 }
 
+// testHarness bundles the mocks and handler used by every message-handler test.
+type testHarness struct {
+	handler            *ReplicatorMessageHandler
+	companyCache       *MockCacheProvider[*rulesengine.Company]
+	companyLookupCache *MockCacheProvider[string]
+	userCache          *MockCacheProvider[*rulesengine.User]
+	userLookupCache    *MockCacheProvider[string]
+	flagCache          *MockCacheProvider[*rulesengine.Flag]
+}
+
+func newTestHarness(t *testing.T) *testHarness {
+	t.Helper()
+	h := &testHarness{
+		companyCache:       NewMockCacheProvider[*rulesengine.Company](),
+		companyLookupCache: NewMockCacheProvider[string](),
+		userCache:          NewMockCacheProvider[*rulesengine.User](),
+		userLookupCache:    NewMockCacheProvider[string](),
+		flagCache:          NewMockCacheProvider[*rulesengine.Flag](),
+	}
+	h.handler = NewReplicatorMessageHandler(
+		NewSchematicLogger(),
+		h.companyCache,
+		h.companyLookupCache,
+		h.userCache,
+		h.userLookupCache,
+		h.flagCache,
+		5*time.Minute,
+	)
+	return h
+}
+
 // Test data helpers
 func createTestCompany(t *testing.T) *rulesengine.Company {
 	t.Helper()
@@ -143,26 +174,8 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mocks
-			logger := NewSchematicLogger()
-			mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-			mockCompanyLookupCache := NewMockCacheProvider[string]()
-			mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-			mockUserLookupCache := NewMockCacheProvider[string]()
-			mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
+			h := newTestHarness(t)
 
-			// Create handler
-			handler := NewReplicatorMessageHandler(
-				logger,
-				mockCompanyCache,
-				mockCompanyLookupCache,
-				mockUserCache,
-				mockUserLookupCache,
-				mockFlagCache,
-				5*time.Minute,
-			)
-
-			// Prepare test data
 			companyData, err := json.Marshal(tt.company)
 			assert.NoError(t, err)
 
@@ -175,39 +188,36 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 			// Setup expectations
 			if tt.messageType == schematicdatastreamws.MessageTypeDelete {
 				idKey := companyIDCacheKey(tt.company.ID)
-				mockCompanyCache.On("Delete", mock.Anything, idKey).Return(nil)
+				h.companyCache.On("Delete", mock.Anything, idKey).Return(nil)
 				for key, value := range tt.company.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-					mockCompanyLookupCache.On("Delete", mock.Anything, cacheKey).Return(nil)
+					h.companyLookupCache.On("Delete", mock.Anything, cacheKey).Return(nil)
 				}
 			} else if tt.messageType == schematicdatastreamws.MessageTypePartial {
 				// Partial with cache miss: expect Get (not found), skip without Set
 				idKey := companyIDCacheKey(tt.company.ID)
 				var nilCompany *rulesengine.Company
-				mockCompanyCache.On("Get", mock.Anything, idKey).Return(nilCompany, fmt.Errorf("not found"))
+				h.companyCache.On("Get", mock.Anything, idKey).Return(nilCompany, fmt.Errorf("not found"))
 			} else {
 				idKey := companyIDCacheKey(tt.company.ID)
-				mockCompanyCache.On("Set", mock.Anything, idKey, tt.company, 5*time.Minute).Return(nil)
+				h.companyCache.On("Set", mock.Anything, idKey, tt.company, 5*time.Minute).Return(nil)
 				for key, value := range tt.company.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-					mockCompanyLookupCache.On("Set", mock.Anything, cacheKey, tt.company.ID, 5*time.Minute).Return(nil)
+					h.companyLookupCache.On("Set", mock.Anything, cacheKey, tt.company.ID, 5*time.Minute).Return(nil)
 				}
 			}
 
-			// Execute test
 			ctx := context.Background()
-			err = handler.HandleMessage(ctx, message)
+			err = h.handler.HandleMessage(ctx, message)
 
-			// Verify results
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 			}
 
-			// Verify mock expectations
-			mockCompanyCache.AssertExpectations(t)
-			mockCompanyLookupCache.AssertExpectations(t)
+			h.companyCache.AssertExpectations(t)
+			h.companyLookupCache.AssertExpectations(t)
 		})
 	}
 }
@@ -241,26 +251,8 @@ func TestReplicatorMessageHandler_HandleUserMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mocks
-			logger := NewSchematicLogger()
-			mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-			mockCompanyLookupCache := NewMockCacheProvider[string]()
-			mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-			mockUserLookupCache := NewMockCacheProvider[string]()
-			mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
+			h := newTestHarness(t)
 
-			// Create handler
-			handler := NewReplicatorMessageHandler(
-				logger,
-				mockCompanyCache,
-				mockCompanyLookupCache,
-				mockUserCache,
-				mockUserLookupCache,
-				mockFlagCache,
-				5*time.Minute,
-			)
-
-			// Prepare test data
 			userData, err := json.Marshal(tt.user)
 			assert.NoError(t, err)
 
@@ -270,42 +262,37 @@ func TestReplicatorMessageHandler_HandleUserMessage(t *testing.T) {
 				Data:        json.RawMessage(userData),
 			}
 
-			// Setup expectations based on message type
 			if tt.messageType == schematicdatastreamws.MessageTypeDelete {
 				idKey := userIDCacheKey(tt.user.ID)
-				mockUserCache.On("Delete", mock.Anything, idKey).Return(nil)
+				h.userCache.On("Delete", mock.Anything, idKey).Return(nil)
 				for key, value := range tt.user.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-					mockUserLookupCache.On("Delete", mock.Anything, cacheKey).Return(nil)
+					h.userLookupCache.On("Delete", mock.Anything, cacheKey).Return(nil)
 				}
 			} else if tt.messageType == schematicdatastreamws.MessageTypePartial {
-				// Partial with cache miss: expect Get (not found), skip without Set
 				idKey := userIDCacheKey(tt.user.ID)
 				var nilUser *rulesengine.User
-				mockUserCache.On("Get", mock.Anything, idKey).Return(nilUser, fmt.Errorf("not found"))
+				h.userCache.On("Get", mock.Anything, idKey).Return(nilUser, fmt.Errorf("not found"))
 			} else {
 				idKey := userIDCacheKey(tt.user.ID)
-				mockUserCache.On("Set", mock.Anything, idKey, tt.user, 5*time.Minute).Return(nil)
+				h.userCache.On("Set", mock.Anything, idKey, tt.user, 5*time.Minute).Return(nil)
 				for key, value := range tt.user.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-					mockUserLookupCache.On("Set", mock.Anything, cacheKey, tt.user.ID, 5*time.Minute).Return(nil)
+					h.userLookupCache.On("Set", mock.Anything, cacheKey, tt.user.ID, 5*time.Minute).Return(nil)
 				}
 			}
 
-			// Execute test
 			ctx := context.Background()
-			err = handler.HandleMessage(ctx, message)
+			err = h.handler.HandleMessage(ctx, message)
 
-			// Verify results
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 			}
 
-			// Verify mock expectations
-			mockUserCache.AssertExpectations(t)
-			mockUserLookupCache.AssertExpectations(t)
+			h.userCache.AssertExpectations(t)
+			h.userLookupCache.AssertExpectations(t)
 		})
 	}
 }
@@ -339,47 +326,21 @@ func TestReplicatorMessageHandler_HandleFlagMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mocks
-			logger := NewSchematicLogger()
-			mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-			mockCompanyLookupCache := NewMockCacheProvider[string]()
-			mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-			mockUserLookupCache := NewMockCacheProvider[string]()
-			mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
+			h := newTestHarness(t)
 
-			// Create handler
-			handler := NewReplicatorMessageHandler(
-				logger,
-				mockCompanyCache,
-				mockCompanyLookupCache,
-				mockUserCache,
-				mockUserLookupCache,
-				mockFlagCache,
-				5*time.Minute,
-			)
-
-			// Prepare test data
 			var message *schematicdatastreamws.DataStreamResp
-
 			if tt.messageType == schematicdatastreamws.MessageTypeDelete {
-				// For delete messages, we expect just the flag key/ID
-				deleteData := map[string]string{
-					"key": tt.flag.Key,
-					"id":  tt.flag.ID,
-				}
+				deleteData := map[string]string{"key": tt.flag.Key, "id": tt.flag.ID}
 				flagData, err := json.Marshal(deleteData)
 				assert.NoError(t, err)
-
 				message = &schematicdatastreamws.DataStreamResp{
 					EntityType:  string(schematicdatastreamws.EntityTypeFlag),
 					MessageType: tt.messageType,
 					Data:        json.RawMessage(flagData),
 				}
 			} else {
-				// For create/update messages, we expect the full flag
 				flagData, err := json.Marshal(tt.flag)
 				assert.NoError(t, err)
-
 				message = &schematicdatastreamws.DataStreamResp{
 					EntityType:  string(schematicdatastreamws.EntityTypeFlag),
 					MessageType: tt.messageType,
@@ -387,57 +348,32 @@ func TestReplicatorMessageHandler_HandleFlagMessage(t *testing.T) {
 				}
 			}
 
-			// Setup expectations
 			if tt.messageType == schematicdatastreamws.MessageTypeDelete {
-				// For delete operations, expect Delete call for the flag
 				cacheKey := flagCacheKey(tt.flag.Key)
-				mockFlagCache.On("Delete", mock.Anything, cacheKey).Return(nil)
+				h.flagCache.On("Delete", mock.Anything, cacheKey).Return(nil)
 			} else {
-				// For create/update operations, expect Set call for the flag
-				// Note: Single flag processing should NOT call DeleteMissing
 				cacheKey := flagCacheKey(tt.flag.Key)
-				mockFlagCache.On("Set", mock.Anything, cacheKey, tt.flag, 5*time.Minute).Return(nil)
+				h.flagCache.On("Set", mock.Anything, cacheKey, tt.flag, 5*time.Minute).Return(nil)
 			}
 
-			// Execute test
 			ctx := context.Background()
-			err := handler.HandleMessage(ctx, message)
+			err := h.handler.HandleMessage(ctx, message)
 
-			// Verify results
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 			}
 
-			// Verify mock expectations
-			mockFlagCache.AssertExpectations(t)
+			h.flagCache.AssertExpectations(t)
 		})
 	}
 }
 
 func TestReplicatorMessageHandler_HandleFlagsMessage(t *testing.T) {
 	t.Run("Handle bulk flags message with DeleteMissing", func(t *testing.T) {
-		// Create mocks
-		logger := NewSchematicLogger()
-		mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-		mockCompanyLookupCache := NewMockCacheProvider[string]()
-		mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-		mockUserLookupCache := NewMockCacheProvider[string]()
-		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
+		h := newTestHarness(t)
 
-		// Create handler
-		handler := NewReplicatorMessageHandler(
-			logger,
-			mockCompanyCache,
-			mockCompanyLookupCache,
-			mockUserCache,
-			mockUserLookupCache,
-			mockFlagCache,
-			5*time.Minute,
-		)
-
-		// Prepare test data - multiple flags
 		flags := []*rulesengine.Flag{
 			createTestFlag(t),
 			{
@@ -458,51 +394,25 @@ func TestReplicatorMessageHandler_HandleFlagsMessage(t *testing.T) {
 			Data:        json.RawMessage(flagsData),
 		}
 
-		// Setup expectations for bulk flags processing
 		var expectedCacheKeys []string
 		for _, flag := range flags {
 			cacheKey := flagCacheKey(flag.Key)
 			expectedCacheKeys = append(expectedCacheKeys, cacheKey)
-			mockFlagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
+			h.flagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
 		}
+		h.flagCache.On("DeleteMissing", mock.Anything, expectedCacheKeys).Return(nil)
 
-		// Important: Bulk flags processing should call DeleteMissing
-		mockFlagCache.On("DeleteMissing", mock.Anything, expectedCacheKeys).Return(nil)
-
-		// Execute test
 		ctx := context.Background()
-		err = handler.HandleMessage(ctx, message)
-
-		// Verify results
+		err = h.handler.HandleMessage(ctx, message)
 		assert.NoError(t, err)
-
-		// Verify mock expectations - this ensures DeleteMissing was called for bulk processing
-		mockFlagCache.AssertExpectations(t)
+		h.flagCache.AssertExpectations(t)
 	})
 }
 
 func TestReplicatorMessageHandler_SingleVsBulkFlagProcessing(t *testing.T) {
 	t.Run("Single flag processing does NOT call DeleteMissing", func(t *testing.T) {
-		// Create mocks
-		logger := NewSchematicLogger()
-		mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-		mockCompanyLookupCache := NewMockCacheProvider[string]()
-		mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-		mockUserLookupCache := NewMockCacheProvider[string]()
-		mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
+		h := newTestHarness(t)
 
-		// Create handler
-		handler := NewReplicatorMessageHandler(
-			logger,
-			mockCompanyCache,
-			mockCompanyLookupCache,
-			mockUserCache,
-			mockUserLookupCache,
-			mockFlagCache,
-			5*time.Minute,
-		)
-
-		// Single flag message
 		flag := createTestFlag(t)
 		flagData, err := json.Marshal(flag)
 		assert.NoError(t, err)
@@ -513,109 +423,66 @@ func TestReplicatorMessageHandler_SingleVsBulkFlagProcessing(t *testing.T) {
 			Data:        json.RawMessage(flagData),
 		}
 
-		// Setup expectations - only Set, no DeleteMissing
 		cacheKey := flagCacheKey(flag.Key)
-		mockFlagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
-		// Note: We don't set up DeleteMissing expectation - it should NOT be called
+		h.flagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
 
-		// Execute test
 		ctx := context.Background()
-		err = handler.HandleMessage(ctx, message)
-
-		// Verify results
+		err = h.handler.HandleMessage(ctx, message)
 		assert.NoError(t, err)
-
-		// Verify mock expectations - ensures DeleteMissing was NOT called
-		mockFlagCache.AssertExpectations(t)
+		h.flagCache.AssertExpectations(t)
 	})
 }
 
 func TestPartialCompanyMergesWithExistingCache(t *testing.T) {
-	logger := NewSchematicLogger()
-	mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-	mockCompanyLookupCache := NewMockCacheProvider[string]()
-	mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-	mockUserLookupCache := NewMockCacheProvider[string]()
-	mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
+	h := newTestHarness(t)
 
-	handler := NewReplicatorMessageHandler(
-		logger,
-		mockCompanyCache,
-		mockCompanyLookupCache,
-		mockUserCache,
-		mockUserLookupCache,
-		mockFlagCache,
-		5*time.Minute,
-	)
-
-	// Existing company in cache
 	existing := createTestCompany(t)
 	idKey := companyIDCacheKey(existing.ID)
-	mockCompanyCache.On("Get", mock.Anything, idKey).Return(existing, nil)
+	h.companyCache.On("Get", mock.Anything, idKey).Return(existing, nil)
 
-	// Partial: only update traits
 	partialData := json.RawMessage(`{"id":"company-123","traits":[{"value":"Startup","trait_definition":{"id":"plan","entity_type":"company"}}]}`)
-
 	message := &schematicdatastreamws.DataStreamResp{
 		EntityType:  string(schematicdatastreamws.EntityTypeCompany),
 		MessageType: schematicdatastreamws.MessageTypePartial,
 		Data:        partialData,
 	}
 
-	// Expect Set with merged company (traits updated, other fields preserved)
-	mockCompanyCache.On("Set", mock.Anything, idKey, mock.MatchedBy(func(c *rulesengine.Company) bool {
+	h.companyCache.On("Set", mock.Anything, idKey, mock.MatchedBy(func(c *rulesengine.Company) bool {
 		return c.ID == "company-123" &&
-			c.AccountID == "account-456" && // preserved from existing
-			c.EnvironmentID == "env-789" && // preserved from existing
+			c.AccountID == "account-456" &&
+			c.EnvironmentID == "env-789" &&
 			len(c.Traits) == 1 &&
-			c.Traits[0].Value == "Startup" && // updated
-			len(c.Keys) == 2 // preserved from existing
+			c.Traits[0].Value == "Startup" &&
+			len(c.Keys) == 2
 	}), 5*time.Minute).Return(nil)
 
 	for key, value := range existing.Keys {
 		cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-		mockCompanyLookupCache.On("Set", mock.Anything, cacheKey, existing.ID, 5*time.Minute).Return(nil)
+		h.companyLookupCache.On("Set", mock.Anything, cacheKey, existing.ID, 5*time.Minute).Return(nil)
 	}
 
 	ctx := context.Background()
-	err := handler.HandleMessage(ctx, message)
+	err := h.handler.HandleMessage(ctx, message)
 	assert.NoError(t, err)
-	mockCompanyCache.AssertExpectations(t)
-	mockCompanyLookupCache.AssertExpectations(t)
+	h.companyCache.AssertExpectations(t)
+	h.companyLookupCache.AssertExpectations(t)
 }
 
 func TestPartialUserMergesWithExistingCache(t *testing.T) {
-	logger := NewSchematicLogger()
-	mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-	mockCompanyLookupCache := NewMockCacheProvider[string]()
-	mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-	mockUserLookupCache := NewMockCacheProvider[string]()
-	mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
-
-	handler := NewReplicatorMessageHandler(
-		logger,
-		mockCompanyCache,
-		mockCompanyLookupCache,
-		mockUserCache,
-		mockUserLookupCache,
-		mockFlagCache,
-		5*time.Minute,
-	)
+	h := newTestHarness(t)
 
 	existing := createTestUser(t)
 	idKey := userIDCacheKey(existing.ID)
-	mockUserCache.On("Get", mock.Anything, idKey).Return(existing, nil)
+	h.userCache.On("Get", mock.Anything, idKey).Return(existing, nil)
 
-	// Partial: only update traits
 	partialData := json.RawMessage(`{"id":"user-123","traits":[{"value":"Free","trait_definition":{"id":"tier","entity_type":"user"}}]}`)
-
 	message := &schematicdatastreamws.DataStreamResp{
 		EntityType:  string(schematicdatastreamws.EntityTypeUser),
 		MessageType: schematicdatastreamws.MessageTypePartial,
 		Data:        partialData,
 	}
 
-	mockUserCache.On("Set", mock.Anything, idKey, mock.MatchedBy(func(u *rulesengine.User) bool {
+	h.userCache.On("Set", mock.Anything, idKey, mock.MatchedBy(func(u *rulesengine.User) bool {
 		return u.ID == "user-123" &&
 			u.AccountID == "account-456" &&
 			u.EnvironmentID == "env-789" &&
@@ -626,33 +493,18 @@ func TestPartialUserMergesWithExistingCache(t *testing.T) {
 
 	for key, value := range existing.Keys {
 		cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-		mockUserLookupCache.On("Set", mock.Anything, cacheKey, existing.ID, 5*time.Minute).Return(nil)
+		h.userLookupCache.On("Set", mock.Anything, cacheKey, existing.ID, 5*time.Minute).Return(nil)
 	}
 
 	ctx := context.Background()
-	err := handler.HandleMessage(ctx, message)
+	err := h.handler.HandleMessage(ctx, message)
 	assert.NoError(t, err)
-	mockUserCache.AssertExpectations(t)
-	mockUserLookupCache.AssertExpectations(t)
+	h.userCache.AssertExpectations(t)
+	h.userLookupCache.AssertExpectations(t)
 }
 
 func TestFullThenPartialCompany(t *testing.T) {
-	logger := NewSchematicLogger()
-	mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-	mockCompanyLookupCache := NewMockCacheProvider[string]()
-	mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-	mockUserLookupCache := NewMockCacheProvider[string]()
-	mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
-
-	handler := NewReplicatorMessageHandler(
-		logger,
-		mockCompanyCache,
-		mockCompanyLookupCache,
-		mockUserCache,
-		mockUserLookupCache,
-		mockFlagCache,
-		5*time.Minute,
-	)
+	h := newTestHarness(t)
 
 	company := createTestCompany(t)
 	idKey := companyIDCacheKey(company.ID)
@@ -667,18 +519,18 @@ func TestFullThenPartialCompany(t *testing.T) {
 		Data:        json.RawMessage(fullData),
 	}
 
-	mockCompanyCache.On("Set", mock.Anything, idKey, company, 5*time.Minute).Return(nil).Once()
+	h.companyCache.On("Set", mock.Anything, idKey, company, 5*time.Minute).Return(nil).Once()
 	for key, value := range company.Keys {
 		cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-		mockCompanyLookupCache.On("Set", mock.Anything, cacheKey, company.ID, 5*time.Minute).Return(nil)
+		h.companyLookupCache.On("Set", mock.Anything, cacheKey, company.ID, 5*time.Minute).Return(nil)
 	}
 
 	ctx := context.Background()
-	err = handler.HandleMessage(ctx, fullMsg)
+	err = h.handler.HandleMessage(ctx, fullMsg)
 	assert.NoError(t, err)
 
 	// Step 2: Partial message — Get returns the full company
-	mockCompanyCache.On("Get", mock.Anything, idKey).Return(company, nil)
+	h.companyCache.On("Get", mock.Anything, idKey).Return(company, nil)
 
 	partialData := json.RawMessage(`{"id":"company-123","traits":[]}`)
 	partialMsg := &schematicdatastreamws.DataStreamResp{
@@ -687,40 +539,25 @@ func TestFullThenPartialCompany(t *testing.T) {
 		Data:        partialData,
 	}
 
-	mockCompanyCache.On("Set", mock.Anything, idKey, mock.MatchedBy(func(c *rulesengine.Company) bool {
+	h.companyCache.On("Set", mock.Anything, idKey, mock.MatchedBy(func(c *rulesengine.Company) bool {
 		return c.ID == "company-123" &&
 			c.AccountID == "account-456" &&
-			len(c.Traits) == 0 && // cleared by partial
-			len(c.Keys) == 2 // preserved
+			len(c.Traits) == 0 &&
+			len(c.Keys) == 2
 	}), 5*time.Minute).Return(nil).Once()
 
-	err = handler.HandleMessage(ctx, partialMsg)
+	err = h.handler.HandleMessage(ctx, partialMsg)
 	assert.NoError(t, err)
-	mockCompanyCache.AssertExpectations(t)
+	h.companyCache.AssertExpectations(t)
 }
 
 func TestPartialThenFullCompany(t *testing.T) {
-	logger := NewSchematicLogger()
-	mockCompanyCache := NewMockCacheProvider[*rulesengine.Company]()
-	mockCompanyLookupCache := NewMockCacheProvider[string]()
-	mockUserCache := NewMockCacheProvider[*rulesengine.User]()
-	mockUserLookupCache := NewMockCacheProvider[string]()
-	mockFlagCache := NewMockCacheProvider[*rulesengine.Flag]()
-
-	handler := NewReplicatorMessageHandler(
-		logger,
-		mockCompanyCache,
-		mockCompanyLookupCache,
-		mockUserCache,
-		mockUserLookupCache,
-		mockFlagCache,
-		5*time.Minute,
-	)
+	h := newTestHarness(t)
 
 	company := createTestCompany(t)
 	idKey := companyIDCacheKey(company.ID)
 
-	// Step 1: Partial with cache miss — writes as-is
+	// Step 1: Partial with cache miss — skipped
 	partialData := json.RawMessage(`{"id":"company-123","traits":[]}`)
 	partialMsg := &schematicdatastreamws.DataStreamResp{
 		EntityType:  string(schematicdatastreamws.EntityTypeCompany),
@@ -729,11 +566,10 @@ func TestPartialThenFullCompany(t *testing.T) {
 	}
 
 	var nilCompany *rulesengine.Company
-	mockCompanyCache.On("Get", mock.Anything, idKey).Return(nilCompany, fmt.Errorf("not found")).Once()
-	// Partial as-is has no keys, so cacheCompanyForKeys returns nil (no cache writes)
+	h.companyCache.On("Get", mock.Anything, idKey).Return(nilCompany, fmt.Errorf("not found")).Once()
 
 	ctx := context.Background()
-	err := handler.HandleMessage(ctx, partialMsg)
+	err := h.handler.HandleMessage(ctx, partialMsg)
 	assert.NoError(t, err)
 
 	// Step 2: Full message overwrites everything
@@ -746,15 +582,15 @@ func TestPartialThenFullCompany(t *testing.T) {
 		Data:        json.RawMessage(fullData),
 	}
 
-	mockCompanyCache.On("Set", mock.Anything, idKey, company, 5*time.Minute).Return(nil).Once()
+	h.companyCache.On("Set", mock.Anything, idKey, company, 5*time.Minute).Return(nil).Once()
 	for key, value := range company.Keys {
 		cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-		mockCompanyLookupCache.On("Set", mock.Anything, cacheKey, company.ID, 5*time.Minute).Return(nil)
+		h.companyLookupCache.On("Set", mock.Anything, cacheKey, company.ID, 5*time.Minute).Return(nil)
 	}
 
-	err = handler.HandleMessage(ctx, fullMsg)
+	err = h.handler.HandleMessage(ctx, fullMsg)
 	assert.NoError(t, err)
-	mockCompanyCache.AssertExpectations(t)
+	h.companyCache.AssertExpectations(t)
 }
 
 // Test the convertToRulesEngineCompany function specifically for credit balance mapping
