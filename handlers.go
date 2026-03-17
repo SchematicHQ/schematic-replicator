@@ -12,6 +12,7 @@ import (
 	schematicdatastreamws "github.com/schematichq/schematic-datastream-ws"
 	schematicgo "github.com/schematichq/schematic-go"
 	"github.com/schematichq/schematic-go/client"
+	"github.com/schematichq/schematic-go/datastream"
 )
 
 // ReplicatorMessageHandler implements the MessageHandler interface
@@ -221,8 +222,7 @@ func (h *ReplicatorMessageHandler) handleFlagMessage(ctx context.Context, messag
 func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, message *schematicdatastreamws.DataStreamResp) error {
 	h.logger.Debug(ctx, fmt.Sprintf("Received company message: %v", message))
 	switch message.MessageType {
-	case schematicdatastreamws.MessageTypeFull, schematicdatastreamws.MessageTypePartial:
-		// Data comes as rulesengine.Company directly
+	case schematicdatastreamws.MessageTypeFull:
 		var company *rulesengine.Company
 		if err := json.Unmarshal(message.Data, &company); err != nil {
 			h.logger.Error(ctx, fmt.Sprintf("Failed to unmarshal company data: %v", err))
@@ -233,12 +233,10 @@ func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, mes
 			return nil
 		}
 
-		// Lock for cache operations and cache company for all keys (matching schematic-go pattern)
 		h.companyMu.Lock()
 		cacheResults := h.cacheCompanyForKeys(ctx, company)
 		h.companyMu.Unlock()
 
-		// Check for cache errors and log warnings (non-blocking like schematic-go)
 		for cacheKey, cacheErr := range cacheResults {
 			if cacheErr != nil {
 				h.logger.Warn(ctx, fmt.Sprintf("Cache error for company key '%s': %v", cacheKey, cacheErr))
@@ -247,6 +245,39 @@ func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, mes
 
 		if len(cacheResults) > 0 {
 			h.logger.Debug(ctx, fmt.Sprintf("Cached company with %d keys: %s", len(cacheResults), company.ID))
+		}
+
+	case schematicdatastreamws.MessageTypePartial:
+		id, err := datastream.ExtractIDFromJSON(message.Data)
+		if err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to extract company ID from partial message: %v", err))
+			return err
+		}
+
+		h.companyMu.Lock()
+		existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(id))
+		if existErr != nil || existing == nil {
+			h.companyMu.Unlock()
+			h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial company '%s', skipping", id))
+			return nil
+		}
+		company, mergeErr := datastream.PartialCompany(existing, message.Data)
+		if mergeErr != nil {
+			h.companyMu.Unlock()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company: %v", mergeErr))
+			return mergeErr
+		}
+		cacheResults := h.cacheCompanyForKeys(ctx, company)
+		h.companyMu.Unlock()
+
+		for cacheKey, cacheErr := range cacheResults {
+			if cacheErr != nil {
+				h.logger.Warn(ctx, fmt.Sprintf("Cache error for company key '%s': %v", cacheKey, cacheErr))
+			}
+		}
+
+		if len(cacheResults) > 0 {
+			h.logger.Debug(ctx, fmt.Sprintf("Cached partial company with %d keys: %s", len(cacheResults), company.ID))
 		}
 
 	case schematicdatastreamws.MessageTypeDelete:
@@ -330,8 +361,7 @@ func (h *ReplicatorMessageHandler) cacheUserForKeys(ctx context.Context, user *r
 // User handling
 func (h *ReplicatorMessageHandler) handleUserMessage(ctx context.Context, message *schematicdatastreamws.DataStreamResp) error {
 	switch message.MessageType {
-	case schematicdatastreamws.MessageTypeFull, schematicdatastreamws.MessageTypePartial:
-		// Data comes as rulesengine.User directly
+	case schematicdatastreamws.MessageTypeFull:
 		var user *rulesengine.User
 		if err := json.Unmarshal(message.Data, &user); err != nil {
 			h.logger.Error(ctx, fmt.Sprintf("Failed to unmarshal user data: %v", err))
@@ -342,12 +372,10 @@ func (h *ReplicatorMessageHandler) handleUserMessage(ctx context.Context, messag
 			return nil
 		}
 
-		// Lock for cache operations and cache user for all keys (matching schematic-go pattern)
 		h.userMu.Lock()
 		cacheResults := h.cacheUserForKeys(ctx, user)
 		h.userMu.Unlock()
 
-		// Check for cache errors and log warnings (non-blocking like schematic-go)
 		for cacheKey, cacheErr := range cacheResults {
 			if cacheErr != nil {
 				h.logger.Warn(ctx, fmt.Sprintf("Cache error for user key '%s': %v", cacheKey, cacheErr))
@@ -358,8 +386,40 @@ func (h *ReplicatorMessageHandler) handleUserMessage(ctx context.Context, messag
 			h.logger.Debug(ctx, fmt.Sprintf("Cached user with %d keys: %s", len(cacheResults), user.ID))
 		}
 
+	case schematicdatastreamws.MessageTypePartial:
+		id, err := datastream.ExtractIDFromJSON(message.Data)
+		if err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to extract user ID from partial message: %v", err))
+			return err
+		}
+
+		h.userMu.Lock()
+		existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(id))
+		if existErr != nil || existing == nil {
+			h.userMu.Unlock()
+			h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial user '%s', skipping", id))
+			return nil
+		}
+		user, mergeErr := datastream.PartialUser(existing, message.Data)
+		if mergeErr != nil {
+			h.userMu.Unlock()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user: %v", mergeErr))
+			return mergeErr
+		}
+		cacheResults := h.cacheUserForKeys(ctx, user)
+		h.userMu.Unlock()
+
+		for cacheKey, cacheErr := range cacheResults {
+			if cacheErr != nil {
+				h.logger.Warn(ctx, fmt.Sprintf("Cache error for user key '%s': %v", cacheKey, cacheErr))
+			}
+		}
+
+		if len(cacheResults) > 0 {
+			h.logger.Debug(ctx, fmt.Sprintf("Cached partial user with %d keys: %s", len(cacheResults), user.ID))
+		}
+
 	case schematicdatastreamws.MessageTypeDelete:
-		// For delete, expect user data with keys (matching schematic-go)
 		var user *rulesengine.User
 		if err := json.Unmarshal(message.Data, &user); err != nil {
 			h.logger.Error(ctx, fmt.Sprintf("Failed to unmarshal user delete data: %v", err))
