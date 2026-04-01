@@ -563,8 +563,8 @@ func (h *ConnectionReadyHandler) OnConnectionReady(ctx context.Context) error {
 func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) error {
 	h.logger.Info(ctx, "Loading companies from Schematic API")
 
-	pageSize := 100
-	offset := 0
+	pageSize := int64(100)
+	offset := int64(0)
 	totalCompanies := 0
 	var allLookupKeys []string // Track all successfully cached lookup keys for eviction
 	var allIDKeys []string     // Track all successfully cached ID keys for eviction
@@ -616,7 +616,7 @@ func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) erro
 		totalCompanies += len(companiesResp.Data)
 
 		// Check if we got fewer results than the page size, indicating we've reached the end
-		if len(companiesResp.Data) < pageSize {
+		if int64(len(companiesResp.Data)) < pageSize {
 			h.logger.Debug(ctx, fmt.Sprintf("Reached end of companies list (got %d < %d)", len(companiesResp.Data), pageSize))
 			break
 		}
@@ -652,8 +652,8 @@ func (h *ConnectionReadyHandler) loadAndCacheCompanies(ctx context.Context) erro
 func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 	h.logger.Info(ctx, "Loading users from Schematic API")
 
-	pageSize := 100
-	offset := 0
+	pageSize := int64(100)
+	offset := int64(0)
 	totalUsers := 0
 	var allLookupKeys []string // Track all successfully cached lookup keys for eviction
 	var allIDKeys []string     // Track all successfully cached ID keys for eviction
@@ -705,7 +705,7 @@ func (h *ConnectionReadyHandler) loadAndCacheUsers(ctx context.Context) error {
 		totalUsers += len(usersResp.Data)
 
 		// Check if we got fewer results than the page size, indicating we've reached the end
-		if len(usersResp.Data) < pageSize {
+		if int64(len(usersResp.Data)) < pageSize {
 			h.logger.Debug(ctx, fmt.Sprintf("Reached end of users list (got %d < %d)", len(usersResp.Data), pageSize))
 			break
 		}
