@@ -1,6 +1,6 @@
 module github.com/schematichq/schematic-datastream-replicator
 
-go 1.26.0
+go 1.26.1
 
 require (
 	github.com/alicebob/miniredis/v2 v2.37.0

@@ -7,7 +7,7 @@ ARG VERSION
 ARG REVISION
 
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS builder
 
 # Install security updates and build dependencies
 RUN apk update && apk add --no-cache \
