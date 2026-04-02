@@ -62,7 +62,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: schematic-redis
+    container_name: schematic-replicator-redis
     ports:
       - "6380:6379"  # Redis port (mapped to 6380 to avoid conflicts)
     labels:

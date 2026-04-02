@@ -1546,9 +1546,11 @@ func (al *AsyncInitialLoader) loadCompaniesConcurrent(ctx context.Context) error
 			}
 
 			// Fetch the page
+			limit64 := int64(pageSize)
+			offset64 := int64(offset)
 			companiesResp, err := al.schematicClient.Companies.ListCompanies(ctx, &schematicgo.ListCompaniesRequest{
-				Limit:  &pageSize,
-				Offset: &offset,
+				Limit:  &limit64,
+				Offset: &offset64,
 			})
 
 			if err != nil {
@@ -1702,9 +1704,11 @@ func (al *AsyncInitialLoader) loadUsersConcurrent(ctx context.Context) error {
 			}
 
 			// Fetch the page
+			limit64 := int64(pageSize)
+			offset64 := int64(offset)
 			usersResp, err := al.schematicClient.Companies.ListUsers(ctx, &schematicgo.ListUsersRequest{
-				Limit:  &pageSize,
-				Offset: &offset,
+				Limit:  &limit64,
+				Offset: &offset64,
 			})
 
 			if err != nil {
