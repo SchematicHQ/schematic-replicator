@@ -205,7 +205,7 @@ jobs:
     steps:
       # Security: Scan the built images in both registries
       - name: Run Trivy vulnerability scanner on ${{ matrix.registry.name }}
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ matrix.registry.image }}
           format: 'table'
