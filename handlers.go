@@ -248,11 +248,11 @@ func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, mes
 		}
 
 	case schematicdatastreamws.MessageTypePartial:
-		id, err := datastream.ExtractIDFromJSON(message.Data)
-		if err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to extract company ID from partial message: %v", err))
-			return err
+		if message.EntityID == nil || *message.EntityID == "" {
+			h.logger.Error(ctx, "Partial company message missing entity_id")
+			return fmt.Errorf("partial company message missing entity_id")
 		}
+		id := *message.EntityID
 
 		h.companyMu.Lock()
 		existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(id))
@@ -387,11 +387,11 @@ func (h *ReplicatorMessageHandler) handleUserMessage(ctx context.Context, messag
 		}
 
 	case schematicdatastreamws.MessageTypePartial:
-		id, err := datastream.ExtractIDFromJSON(message.Data)
-		if err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to extract user ID from partial message: %v", err))
-			return err
+		if message.EntityID == nil || *message.EntityID == "" {
+			h.logger.Error(ctx, "Partial user message missing entity_id")
+			return fmt.Errorf("partial user message missing entity_id")
 		}
+		id := *message.EntityID
 
 		h.userMu.Lock()
 		existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(id))
