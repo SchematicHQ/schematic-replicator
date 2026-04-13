@@ -692,11 +692,11 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 // processPartialCompanyMessages handles partial company updates individually via read-modify-write.
 func (h *AsyncReplicatorMessageHandler) processPartialCompanyMessages(ctx context.Context, jobs []*MessageJob) {
 	for _, job := range jobs {
-		id, err := datastream.ExtractIDFromJSON(job.Message.Data)
-		if err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to extract company ID from partial message: %v", err))
+		if job.Message.EntityID == nil || *job.Message.EntityID == "" {
+			h.logger.Error(ctx, "Partial company message missing entity_id")
 			continue
 		}
+		id := *job.Message.EntityID
 
 		h.companyMu.Lock()
 		existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(id))
@@ -735,11 +735,11 @@ func (h *AsyncReplicatorMessageHandler) processPartialCompanyMessages(ctx contex
 // processPartialUserMessages handles partial user updates individually via read-modify-write.
 func (h *AsyncReplicatorMessageHandler) processPartialUserMessages(ctx context.Context, jobs []*MessageJob) {
 	for _, job := range jobs {
-		id, err := datastream.ExtractIDFromJSON(job.Message.Data)
-		if err != nil {
-			h.logger.Error(ctx, fmt.Sprintf("Failed to extract user ID from partial message: %v", err))
+		if job.Message.EntityID == nil || *job.Message.EntityID == "" {
+			h.logger.Error(ctx, "Partial user message missing entity_id")
 			continue
 		}
+		id := *job.Message.EntityID
 
 		h.userMu.Lock()
 		existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(id))

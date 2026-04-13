@@ -207,10 +207,13 @@ func (r *redisCache[T]) DeleteByPattern(ctx context.Context, pattern string) (in
 		}
 	}
 
-	// Delete keys in batches
+	// Delete keys individually via pipeline to avoid CROSSSLOT errors in Redis Cluster
 	if len(allKeys) > 0 {
-		err := r.client.Del(ctx, allKeys...).Err()
-		if err != nil {
+		pipe := r.client.Pipeline()
+		for _, key := range allKeys {
+			pipe.Del(ctx, key)
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
 			return 0, fmt.Errorf("failed to delete keys matching pattern %s: %w", pattern, err)
 		}
 	}
@@ -432,10 +435,13 @@ func (c *CacheCleanupManager) deleteStaleKeysFromRedis(
 		}
 	}
 
-	// Delete stale keys in batches
+	// Delete stale keys individually via pipeline to avoid CROSSSLOT errors in Redis Cluster
 	if len(staleKeys) > 0 {
-		err := client.Del(ctx, staleKeys...).Err()
-		if err != nil {
+		pipe := client.Pipeline()
+		for _, key := range staleKeys {
+			pipe.Del(ctx, key)
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
 			return 0, fmt.Errorf("failed to delete stale keys: %w", err)
 		}
 	}

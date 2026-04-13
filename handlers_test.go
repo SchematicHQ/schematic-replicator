@@ -184,6 +184,11 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 				MessageType: tt.messageType,
 				Data:        json.RawMessage(companyData),
 			}
+			// Partial messages identify the cached entity via top-level entity_id.
+			if tt.messageType == schematicdatastreamws.MessageTypePartial {
+				id := tt.company.ID
+				message.EntityID = &id
+			}
 
 			// Setup expectations
 			if tt.messageType == schematicdatastreamws.MessageTypeDelete {
@@ -260,6 +265,11 @@ func TestReplicatorMessageHandler_HandleUserMessage(t *testing.T) {
 				EntityType:  string(schematicdatastreamws.EntityTypeUser),
 				MessageType: tt.messageType,
 				Data:        json.RawMessage(userData),
+			}
+			// Partial messages identify the cached entity via top-level entity_id.
+			if tt.messageType == schematicdatastreamws.MessageTypePartial {
+				id := tt.user.ID
+				message.EntityID = &id
 			}
 
 			if tt.messageType == schematicdatastreamws.MessageTypeDelete {
@@ -440,9 +450,13 @@ func TestPartialCompanyMergesWithExistingCache(t *testing.T) {
 	idKey := companyIDCacheKey(existing.ID)
 	h.companyCache.On("Get", mock.Anything, idKey).Return(existing, nil)
 
-	partialData := json.RawMessage(`{"id":"company-123","traits":[{"value":"Startup","trait_definition":{"id":"plan","entity_type":"company"}}]}`)
+	// Wire shape from the API: data is wrapped under the field name (e.g.
+	// "traits"), no top-level id. Cache lookup uses the envelope's entity_id.
+	id := existing.ID
+	partialData := json.RawMessage(`{"traits":[{"value":"Startup","trait_definition":{"id":"plan","entity_type":"company"}}]}`)
 	message := &schematicdatastreamws.DataStreamResp{
 		EntityType:  string(schematicdatastreamws.EntityTypeCompany),
+		EntityID:    &id,
 		MessageType: schematicdatastreamws.MessageTypePartial,
 		Data:        partialData,
 	}
@@ -475,9 +489,13 @@ func TestPartialUserMergesWithExistingCache(t *testing.T) {
 	idKey := userIDCacheKey(existing.ID)
 	h.userCache.On("Get", mock.Anything, idKey).Return(existing, nil)
 
-	partialData := json.RawMessage(`{"id":"user-123","traits":[{"value":"Free","trait_definition":{"id":"tier","entity_type":"user"}}]}`)
+	// Wire shape from the API: data is wrapped under the field name (e.g.
+	// "traits"), no top-level id. Cache lookup uses the envelope's entity_id.
+	id := existing.ID
+	partialData := json.RawMessage(`{"traits":[{"value":"Free","trait_definition":{"id":"tier","entity_type":"user"}}]}`)
 	message := &schematicdatastreamws.DataStreamResp{
 		EntityType:  string(schematicdatastreamws.EntityTypeUser),
+		EntityID:    &id,
 		MessageType: schematicdatastreamws.MessageTypePartial,
 		Data:        partialData,
 	}
@@ -532,9 +550,11 @@ func TestFullThenPartialCompany(t *testing.T) {
 	// Step 2: Partial message — Get returns the full company
 	h.companyCache.On("Get", mock.Anything, idKey).Return(company, nil)
 
-	partialData := json.RawMessage(`{"id":"company-123","traits":[]}`)
+	id := company.ID
+	partialData := json.RawMessage(`{"traits":[]}`)
 	partialMsg := &schematicdatastreamws.DataStreamResp{
 		EntityType:  string(schematicdatastreamws.EntityTypeCompany),
+		EntityID:    &id,
 		MessageType: schematicdatastreamws.MessageTypePartial,
 		Data:        partialData,
 	}
@@ -558,9 +578,11 @@ func TestPartialThenFullCompany(t *testing.T) {
 	idKey := companyIDCacheKey(company.ID)
 
 	// Step 1: Partial with cache miss — skipped
-	partialData := json.RawMessage(`{"id":"company-123","traits":[]}`)
+	id := company.ID
+	partialData := json.RawMessage(`{"traits":[]}`)
 	partialMsg := &schematicdatastreamws.DataStreamResp{
 		EntityType:  string(schematicdatastreamws.EntityTypeCompany),
+		EntityID:    &id,
 		MessageType: schematicdatastreamws.MessageTypePartial,
 		Data:        partialData,
 	}
