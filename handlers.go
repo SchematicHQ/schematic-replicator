@@ -1020,6 +1020,7 @@ func convertRulesToRulesEngine(apiRules []*schematicgo.Rule) []*rulesengine.Rule
 		if rule != nil {
 			rulesEngineRule := &rulesengine.Rule{
 				ID:            rule.ID,
+				AccountID:     rule.AccountID,
 				EnvironmentID: rule.EnvironmentID,
 				Name:          rule.Name,
 				Priority:      int64(rule.Priority),
@@ -1061,6 +1062,7 @@ func convertEntitlementsToRulesEngine(apiEntitlements []*schematicgo.FeatureEnti
 			FeatureID:       apiEnt.FeatureID,
 			FeatureKey:      apiEnt.FeatureKey,
 			ValueType:       rulesengine.EntitlementValueType(apiEnt.ValueType),
+			SoftLimit:       apiEnt.SoftLimit,
 			EventName:       apiEnt.EventName,
 			MetricResetAt:   apiEnt.MetricResetAt,
 			CreditID:        apiEnt.CreditID,
@@ -1320,5 +1322,6 @@ func convertToRulesEngineTraitDefinition(apiTraitDef *schematicgo.TraitDefinitio
 	return &rulesengine.TraitDefinition{
 		ID:             apiTraitDef.ID,
 		ComparableType: convertTraitTypeToComparableType(string(apiTraitDef.ComparableType)),
+		EntityType:     rulesengine.EntityType(apiTraitDef.EntityType),
 	}
 }
