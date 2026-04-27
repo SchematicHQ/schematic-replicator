@@ -6,7 +6,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/schematichq/rulesengine v0.1.14
-	github.com/schematichq/schematic-datastream-ws v0.2.7
+	github.com/schematichq/schematic-datastream-ws v0.2.8
 	github.com/schematichq/schematic-go v1.4.6
 	github.com/stretchr/testify v1.11.1
 )
