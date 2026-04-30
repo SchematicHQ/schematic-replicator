@@ -1186,7 +1186,7 @@ func convertToRulesEngineConditionGroups(apiConditionGroups []*schematicgo.Condi
 	return conditionGroups
 }
 
-func convertToRulesEngineOperator(operator schematicgo.ConditionOperator) typeconvert.ComparableOperator {
+func convertToRulesEngineOperator(operator schematicgo.ComparableOperator) typeconvert.ComparableOperator {
 	switch operator {
 	case "eq", "equals":
 		return typeconvert.ComparableOperatorEquals
@@ -1261,7 +1261,7 @@ func convertUserTraits(data *schematicgo.UserDetailResponseData) []*rulesengine.
 	return convertToRulesEngineTraits(data.EntityTraits, rulesengine.EntityTypeUser)
 }
 
-func convertToRulesEngineConditionType(conditionType schematicgo.ConditionConditionType) rulesengine.ConditionType {
+func convertToRulesEngineConditionType(conditionType schematicgo.ConditionType) rulesengine.ConditionType {
 	switch conditionType {
 	case "trait":
 		return rulesengine.ConditionTypeTrait
@@ -1284,7 +1284,7 @@ func convertToRulesEngineConditionType(conditionType schematicgo.ConditionCondit
 	return ""
 }
 
-func convertToRulesEngineMetricPeriod(metricPeriod schematicgo.ConditionMetricPeriod) *rulesengine.MetricPeriod {
+func convertToRulesEngineMetricPeriod(metricPeriod schematicgo.MetricPeriod) *rulesengine.MetricPeriod {
 	var period rulesengine.MetricPeriod
 	switch metricPeriod {
 	case "all_time":
@@ -1301,7 +1301,7 @@ func convertToRulesEngineMetricPeriod(metricPeriod schematicgo.ConditionMetricPe
 	return &period
 }
 
-func convertToRulesEngineMetricPeriodMonthReset(monthReset schematicgo.ConditionMetricPeriodMonthReset) *rulesengine.MetricPeriodMonthReset {
+func convertToRulesEngineMetricPeriodMonthReset(monthReset schematicgo.MetricPeriodMonthReset) *rulesengine.MetricPeriodMonthReset {
 	var reset rulesengine.MetricPeriodMonthReset
 	switch monthReset {
 	case "first_of_month":
