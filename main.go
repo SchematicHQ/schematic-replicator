@@ -286,6 +286,7 @@ func main() {
 		MaxReconnectAttempts: 10,
 		MinReconnectDelay:    1 * time.Second,
 		MaxReconnectDelay:    30 * time.Second,
+		ExtraHeaders:         datastreamHandshakeHeaders(),
 	}
 
 	// Get WebSocket ping/pong intervals from environment (optional)
