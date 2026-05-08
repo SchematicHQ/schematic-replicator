@@ -64,7 +64,7 @@ jobs:
       # Build image once with registry-agnostic cache
       - name: Build Docker image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deployments/Dockerfile
@@ -118,7 +118,7 @@ jobs:
 
       # Push to Docker Hub using cached build
       - name: Push to Docker Hub
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deployments/Dockerfile
@@ -173,7 +173,7 @@ jobs:
 
       # Push to ECR using cached build
       - name: Push to Amazon ECR Public
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deployments/Dockerfile  # Fixed: Correct path to Dockerfile
