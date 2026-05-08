@@ -50,7 +50,7 @@ jobs:
       # Extract metadata for consistent tagging across registries
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}
@@ -107,7 +107,7 @@ jobs:
       # Extract Docker Hub specific tags
       - name: Extract Docker Hub metadata
         id: meta-dockerhub
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}
           tags: |
@@ -162,7 +162,7 @@ jobs:
       # Extract ECR specific tags
       - name: Extract ECR metadata
         id: meta-ecr
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_IMAGE }}
           tags: |
