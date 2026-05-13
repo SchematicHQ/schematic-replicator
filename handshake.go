@@ -16,10 +16,11 @@ var (
 	clientVersion     string
 )
 
-// ClientVersion returns the module version of the replicator recorded in the
-// build. For tagged releases this returns the tag (e.g. v1.2.3). For untagged
-// or replace-directive builds it returns "(devel)"; if build info is
-// unavailable, "unknown".
+// ClientVersion returns the replicator version reported on the DataStream
+// handshake. It prefers the ldflag-injected `main.version` used by the
+// Dockerfile build, then falls back to module build info (a tag for
+// `go install …@v1.2.3` builds, "(devel)" for local `go build .`), and
+// finally "unknown".
 func ClientVersion() string {
 	clientVersionOnce.Do(func() {
 		clientVersion = resolveClientVersion()
@@ -28,6 +29,9 @@ func ClientVersion() string {
 }
 
 func resolveClientVersion() string {
+	if version != "" {
+		return version
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "unknown"
