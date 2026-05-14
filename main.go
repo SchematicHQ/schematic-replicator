@@ -21,6 +21,20 @@ import (
 	"github.com/schematichq/schematic-go/option"
 )
 
+// Populated at build time via -ldflags="-X main.version=... -X main.commit=... -X main.buildTime=..."
+var (
+	version   string
+	commit    string
+	buildTime string
+)
+
+func valueOrUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
+}
+
 const (
 	defaultAPIURL               = "https://api.schematichq.com"
 	apiKeyEnvVar                = "SCHEMATIC_API_KEY"
@@ -286,6 +300,7 @@ func main() {
 		MaxReconnectAttempts: 10,
 		MinReconnectDelay:    1 * time.Second,
 		MaxReconnectDelay:    30 * time.Second,
+		ExtraHeaders:         datastreamHandshakeHeaders(),
 	}
 
 	// Get WebSocket ping/pong intervals from environment (optional)
@@ -309,6 +324,7 @@ func main() {
 	}
 
 	logger.Info(context.Background(), "Starting Schematic Datastream Replicator...")
+	logger.Info(context.Background(), fmt.Sprintf("Version: %s, Commit: %s, Build time: %s", ClientVersion(), valueOrUnknown(commit), valueOrUnknown(buildTime)))
 	logger.Info(context.Background(), fmt.Sprintf("API URL: %s", apiBaseURL))
 	if os.Getenv("SCHEMATIC_DATASTREAM_URL") != "" {
 		logger.Info(context.Background(), fmt.Sprintf("Datastream URL: %s (explicit)", datastreamURL))
