@@ -142,6 +142,22 @@ type AsyncReplicatorMessageHandler struct {
 	processedMessages int64
 	droppedMessages   int64
 	metricsMu         sync.RWMutex
+
+	// Replay support (optional; nil when replay is disabled)
+	replayCursor *ReplayCursor
+	reloadFunc   func(ctx context.Context)
+}
+
+// SetReplayCursor injects the cursor the handler records each message's stream
+// ID into, so a reconnect can replay from the last processed message.
+func (h *AsyncReplicatorMessageHandler) SetReplayCursor(cursor *ReplayCursor) {
+	h.replayCursor = cursor
+}
+
+// SetReloadFunc wires the action taken when the server signals that the replay
+// window has aged out and a full reload is required.
+func (h *AsyncReplicatorMessageHandler) SetReloadFunc(fn func(ctx context.Context)) {
+	h.reloadFunc = fn
 }
 
 // AsyncConfig holds configuration for the async handler
@@ -250,6 +266,26 @@ func (h *AsyncReplicatorMessageHandler) HandleMessage(ctx context.Context, messa
 	case <-h.shutdown:
 		return fmt.Errorf("handler is shutting down")
 	default:
+	}
+
+	// The server signals that our resume token aged out of its retention window
+	// and a complete replay is no longer possible — drop the stale cursor and
+	// fall back to a full reload.
+	if message.MessageType == schematicdatastreamws.MessageTypeReload {
+		h.logger.Warn(ctx, "Server signaled replay window aged out; triggering full reload")
+		if h.replayCursor != nil {
+			h.replayCursor.Reset(ctx)
+		}
+		if h.reloadFunc != nil {
+			h.reloadFunc(ctx)
+		}
+		return nil
+	}
+
+	// Record the resume token so a reconnect can replay from the last message we
+	// processed instead of doing a full reload.
+	if h.replayCursor != nil && message.StreamID != nil {
+		h.replayCursor.Record(*message.StreamID)
 	}
 
 	job := &MessageJob{
@@ -1841,6 +1877,32 @@ type AsyncConnectionReadyHandler struct {
 	logger             *SchematicLogger
 	cacheTTL           time.Duration
 	asyncLoader        *AsyncInitialLoader
+	replayCursor       *ReplayCursor // optional; nil when replay is disabled
+}
+
+// SetReplayCursor injects the cursor read on (re)connect to populate ReplayFrom
+// on the subscribe requests.
+func (h *AsyncConnectionReadyHandler) SetReplayCursor(cursor *ReplayCursor) {
+	h.replayCursor = cursor
+}
+
+// replayFrom returns the resume token to attach to subscribe requests, or nil
+// when there is no cursor yet (fresh start → full load).
+func (h *AsyncConnectionReadyHandler) replayFrom() *string {
+	if h.replayCursor == nil {
+		return nil
+	}
+	if from := h.replayCursor.Get(); from != "" {
+		return &from
+	}
+	return nil
+}
+
+// TriggerReload re-runs the bulk initial load. Invoked when the server signals
+// MessageTypeReload (resume token aged out).
+func (h *AsyncConnectionReadyHandler) TriggerReload(ctx context.Context) {
+	h.logger.Info(ctx, "Reloading initial data after replay window aged out")
+	h.asyncLoader.StartAsyncLoading(ctx)
 }
 
 // NewAsyncConnectionReadyHandler creates a new async connection ready handler
@@ -1925,11 +1987,16 @@ func (h *AsyncConnectionReadyHandler) GetAsyncLoadingMetrics() (companiesTime, u
 func (h *AsyncConnectionReadyHandler) subscribeToUpdates(ctx context.Context) error {
 	h.logger.Info(ctx, "Subscribing to company and user updates")
 
+	// On a reconnect, replay missed changes from the last processed message
+	// rather than relying solely on the bulk reload above.
+	replayFrom := h.replayFrom()
+
 	// Subscribe to all company updates using bulk subscription entity type
 	companySubscription := &schematicdatastreamws.DataStreamBaseReq{
 		Data: schematicdatastreamws.DataStreamReq{
 			Action:     schematicdatastreamws.ActionStart,
 			EntityType: schematicdatastreamws.EntityTypeCompanies,
+			ReplayFrom: replayFrom,
 		},
 	}
 	if err := h.wsClient.SendMessage(companySubscription); err != nil {
@@ -1942,6 +2009,7 @@ func (h *AsyncConnectionReadyHandler) subscribeToUpdates(ctx context.Context) er
 		Data: schematicdatastreamws.DataStreamReq{
 			Action:     schematicdatastreamws.ActionStart,
 			EntityType: schematicdatastreamws.EntityTypeUsers,
+			ReplayFrom: replayFrom,
 		},
 	}
 	if err := h.wsClient.SendMessage(userSubscription); err != nil {
@@ -1962,6 +2030,7 @@ func (h *AsyncConnectionReadyHandler) requestFlagsData(ctx context.Context) erro
 		Data: schematicdatastreamws.DataStreamReq{
 			Action:     schematicdatastreamws.ActionStart,
 			EntityType: schematicdatastreamws.EntityTypeFlags,
+			ReplayFrom: h.replayFrom(),
 		},
 	}
 	if err := h.wsClient.SendMessage(flagsRequest); err != nil {

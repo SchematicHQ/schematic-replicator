@@ -498,6 +498,13 @@ func main() {
 	// Create async message handler with caching and batching
 	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncConfig)
 
+	// Replay cursor: lets a reconnect resume from the last processed message
+	// instead of a full reload. Load any persisted value so a process restart
+	// can resume too.
+	replayCursor := NewReplayCursor(redisClient, logger)
+	replayCursor.Load(context.Background())
+	messageHandler.SetReplayCursor(replayCursor)
+
 	// Create connection ready handler (wsClient will be set later)
 	var connectionReadyHandlerFunc schematicdatastreamws.ConnectionReadyHandlerFunc
 	var syncHandler *ConnectionReadyHandler
@@ -508,6 +515,8 @@ func main() {
 			asyncLoaderConfig.PageSize, asyncLoaderConfig.CircuitBreakerThreshold, asyncLoaderConfig.CircuitBreakerTimeout,
 			asyncLoaderConfig.MaxConcurrentRequests, asyncLoaderConfig.RateLimitRPS))
 		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncLoaderConfig)
+		asyncHandler.SetReplayCursor(replayCursor)
+		messageHandler.SetReloadFunc(asyncHandler.TriggerReload)
 		connectionReadyHandlerFunc = asyncHandler.OnConnectionReady
 	} else {
 		logger.Info(context.Background(), "Using synchronous initial loading (default)")
@@ -538,6 +547,11 @@ func main() {
 
 	// Start the WebSocket connection
 	datastreamClient.Start()
+
+	// Periodically persist the replay cursor so a process restart can resume.
+	cursorCtx, cursorCancel := context.WithCancel(context.Background())
+	defer cursorCancel()
+	replayCursor.StartFlusher(cursorCtx, 5*time.Second)
 
 	// Start cache cleanup manager if enabled
 	if cacheCleanupManager != nil {
@@ -587,6 +601,10 @@ func main() {
 	// Wait for shutdown signal
 	<-sigChan
 	logger.Info(context.Background(), "Received shutdown signal, closing connection...")
+
+	// Stop the cursor flusher (flushes once more) so the latest position is
+	// durable across the restart.
+	cursorCancel()
 
 	// Stop cache cleanup manager
 	if cacheCleanupManager != nil {
