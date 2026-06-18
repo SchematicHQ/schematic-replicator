@@ -151,6 +151,7 @@ type AsyncReplicatorMessageHandler struct {
 
 	// Metrics
 	processedMessages int64
+	appliedMessages   int64
 	droppedMessages   int64
 	metricsMu         sync.RWMutex
 
@@ -484,11 +485,22 @@ func (h *AsyncReplicatorMessageHandler) Shutdown(ctx context.Context) error {
 	}
 }
 
-// GetMetrics returns current processing metrics
-func (h *AsyncReplicatorMessageHandler) GetMetrics() (processed, dropped int64) {
+// GetMetrics returns current processing metrics: messages queued, messages
+// applied to the cache (committed), and messages dropped under backpressure.
+func (h *AsyncReplicatorMessageHandler) GetMetrics() (processed, applied, dropped int64) {
 	h.metricsMu.RLock()
 	defer h.metricsMu.RUnlock()
-	return h.processedMessages, h.droppedMessages
+	return h.processedMessages, h.appliedMessages, h.droppedMessages
+}
+
+// incrementAppliedMessages records messages that were applied to the cache.
+func (h *AsyncReplicatorMessageHandler) incrementAppliedMessages(n int) {
+	if n <= 0 {
+		return
+	}
+	h.metricsMu.Lock()
+	defer h.metricsMu.Unlock()
+	h.appliedMessages += int64(n)
 }
 
 // incrementProcessedMessages atomically increments the processed counter
@@ -652,6 +664,7 @@ func (h *AsyncReplicatorMessageHandler) flagsWorker(ctx context.Context, workerI
 // dropped early (circuit breaker open) leaves its stream IDs uncommitted and is
 // recovered on the next reconnect's replay.
 func (h *AsyncReplicatorMessageHandler) completeReplayJobs(jobs []*MessageJob) {
+	h.incrementAppliedMessages(len(jobs))
 	if h.replayCursor == nil {
 		return
 	}
@@ -667,17 +680,17 @@ func (h *AsyncReplicatorMessageHandler) completeReplayJobs(jobs []*MessageJob) {
 // failed to apply — a cache write error, or a partial whose base couldn't be
 // read — are left uncommitted so the next reconnect's replay re-delivers them.
 func (h *AsyncReplicatorMessageHandler) completeCommittableJobs(jobs []*MessageJob, committable map[string]bool) {
-	if h.replayCursor == nil {
-		return
-	}
+	applied := 0
 	for _, job := range jobs {
 		if !committable[job.EntityKey] {
 			continue
 		}
-		if job.Message != nil && job.Message.StreamID != nil {
+		applied++
+		if h.replayCursor != nil && job.Message != nil && job.Message.StreamID != nil {
 			h.replayCursor.Complete(*job.Message.StreamID)
 		}
 	}
+	h.incrementAppliedMessages(applied)
 }
 
 // processBatchedCompanyMessages applies a batch of company messages. Because a
@@ -2089,12 +2102,18 @@ type AsyncConnectionReadyHandler struct {
 	cacheTTL           time.Duration
 	asyncLoader        *AsyncInitialLoader
 	replayCursor       *ReplayCursor // optional; nil when replay is disabled
+	stats              *ReplayStats  // optional; counters for observability
 }
 
 // SetReplayCursor injects the cursor read on (re)connect to populate ReplayFrom
 // on the subscribe requests.
 func (h *AsyncConnectionReadyHandler) SetReplayCursor(cursor *ReplayCursor) {
 	h.replayCursor = cursor
+}
+
+// SetStats injects the counters updated on connect/replay/reload.
+func (h *AsyncConnectionReadyHandler) SetStats(stats *ReplayStats) {
+	h.stats = stats
 }
 
 // replayFrom returns the resume token to attach to subscribe requests, or nil
@@ -2113,6 +2132,7 @@ func (h *AsyncConnectionReadyHandler) replayFrom() *string {
 // MessageTypeReload (resume token aged out).
 func (h *AsyncConnectionReadyHandler) TriggerReload(ctx context.Context) {
 	h.logger.Info(ctx, "Reloading initial data after replay window aged out")
+	h.stats.IncFullReloads()
 	h.asyncLoader.Reload(ctx)
 }
 
@@ -2157,6 +2177,7 @@ func NewAsyncConnectionReadyHandler(
 // OnConnectionReady implements the ConnectionReadyHandler interface for asynchronous loading
 func (h *AsyncConnectionReadyHandler) OnConnectionReady(ctx context.Context) error {
 	// Async mode: start loading in background, establish connection quickly
+	h.stats.IncConnections()
 	h.logger.Info(ctx, "Starting async initial data loading for fast connection setup")
 	h.asyncLoader.StartAsyncLoading(ctx)
 
@@ -2201,6 +2222,12 @@ func (h *AsyncConnectionReadyHandler) subscribeToUpdates(ctx context.Context) er
 	// On a reconnect, replay missed changes from the last processed message
 	// rather than relying solely on the bulk reload above.
 	replayFrom := h.replayFrom()
+	if replayFrom != nil {
+		h.stats.IncReplaysEngaged()
+		h.logger.Info(ctx, fmt.Sprintf("Replaying from stream ID %s", *replayFrom))
+	} else {
+		h.logger.Info(ctx, "No replay cursor; subscribing for a full load")
+	}
 
 	// Subscribe to all company updates using bulk subscription entity type
 	companySubscription := &schematicdatastreamws.DataStreamBaseReq{

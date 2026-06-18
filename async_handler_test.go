@@ -477,9 +477,14 @@ func TestAsyncReplicatorMessageHandler_FlagProcessing(t *testing.T) {
 		flagData, err := json.Marshal(flag)
 		require.NoError(t, err)
 
-		// Set up expectation for single flag caching
+		// Set up expectation for single flag caching. Match on identity rather
+		// than the exact struct: the handler caches the round-tripped flag, which
+		// is functionally equal but not reflect.DeepEqual to the original (e.g.
+		// Rules is a JSONSlice whose nil/empty representation differs).
 		cacheKey := flagCacheKey(flag.Key)
-		mockFlagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
+		mockFlagCache.On("Set", mock.Anything, cacheKey, mock.MatchedBy(func(f *rulesengine.Flag) bool {
+			return f != nil && f.ID == flag.ID && f.Key == flag.Key
+		}), 5*time.Minute).Return(nil)
 
 		message := &schematicdatastreamws.DataStreamResp{
 			EntityType:  string(schematicdatastreamws.EntityTypeFlag),
@@ -526,9 +531,12 @@ func TestAsyncReplicatorMessageHandler_FlagProcessing(t *testing.T) {
 		flagsData, err := json.Marshal(flags)
 		require.NoError(t, err)
 
-		// Set up expectations for bulk flag processing
+		// Set up expectations for bulk flag processing. Match on identity (the
+		// handler caches the round-tripped flag; see the single-flag test).
 		cacheKey := flagCacheKey(flags[0].Key)
-		mockFlagCache.On("Set", mock.Anything, cacheKey, flags[0], 5*time.Minute).Return(nil)
+		mockFlagCache.On("Set", mock.Anything, cacheKey, mock.MatchedBy(func(f *rulesengine.Flag) bool {
+			return f != nil && f.ID == flags[0].ID && f.Key == flags[0].Key
+		}), 5*time.Minute).Return(nil)
 		mockFlagCache.On("DeleteMissing", mock.Anything, []string{cacheKey}).Return(nil)
 
 		message := &schematicdatastreamws.DataStreamResp{
@@ -715,7 +723,7 @@ func TestAsyncReplicatorMessageHandler_Metrics(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Check initial metrics
-		processed, dropped := handler.GetMetrics()
+		processed, _, dropped := handler.GetMetrics()
 		assert.Equal(t, int64(1), processed)
 		assert.Equal(t, int64(0), dropped)
 	})
@@ -892,7 +900,7 @@ func TestAsyncReplicatorMessageHandler_ConcurrentAccess(t *testing.T) {
 		assert.True(t, atomic.LoadInt64(&successCount) > totalExpected/2,
 			"Expected at least half of messages to be processed successfully")
 
-		processed, _ := handler.GetMetrics()
+		processed, _, _ := handler.GetMetrics()
 		assert.True(t, processed > 0, "Expected some messages to be processed")
 	})
 }

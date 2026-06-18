@@ -54,6 +54,11 @@ type HealthServer struct {
 	logger           *SchematicLogger
 	server           *http.Server
 	mu               sync.RWMutex
+
+	// Replay introspection (optional; populated once replay components exist).
+	replayCursor *ReplayCursor
+	replayStats  *ReplayStats
+	msgHandler   *AsyncReplicatorMessageHandler
 }
 
 // HealthStatusType represents the overall health status
@@ -105,6 +110,7 @@ func NewHealthServer(port int, datastreamClient *schematicdatastreamws.Client, r
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", hs.healthHandler)
 	mux.HandleFunc("/ready", hs.readinessHandler)
+	mux.HandleFunc("/debug", hs.debugHandler)
 
 	hs.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -121,6 +127,57 @@ func (hs *HealthServer) SetDatastreamClient(client *schematicdatastreamws.Client
 	hs.mu.Lock()
 	hs.datastreamClient = client
 	hs.mu.Unlock()
+}
+
+// SetReplayDebug wires the replay introspection sources exposed at /debug. Any
+// may be nil (e.g. the cursor when replay is disabled).
+func (hs *HealthServer) SetReplayDebug(cursor *ReplayCursor, stats *ReplayStats, handler *AsyncReplicatorMessageHandler) {
+	hs.mu.Lock()
+	hs.replayCursor = cursor
+	hs.replayStats = stats
+	hs.msgHandler = handler
+	hs.mu.Unlock()
+}
+
+// debugHandler exposes replay/processing introspection for operators and
+// integration tests: the committed cursor, reconnect/replay/reload counters, and
+// message-processing totals.
+func (hs *HealthServer) debugHandler(w http.ResponseWriter, r *http.Request) {
+	hs.mu.RLock()
+	cursor, stats, handler := hs.replayCursor, hs.replayStats, hs.msgHandler
+	hs.mu.RUnlock()
+
+	type replayDebug struct {
+		Enabled bool   `json:"enabled"`
+		Cursor  string `json:"cursor"`
+		ReplayStatsSnapshot
+	}
+	type messageDebug struct {
+		Processed int64 `json:"processed"`
+		Applied   int64 `json:"applied"`
+		Dropped   int64 `json:"dropped"`
+	}
+	resp := struct {
+		Replay    replayDebug  `json:"replay"`
+		Messages  messageDebug `json:"messages"`
+		Timestamp time.Time    `json:"timestamp"`
+	}{
+		Replay:    replayDebug{Enabled: cursor != nil, ReplayStatsSnapshot: stats.Snapshot()},
+		Timestamp: time.Now(),
+	}
+	if cursor != nil {
+		resp.Replay.Cursor = cursor.Get()
+	}
+	if handler != nil {
+		p, a, d := handler.GetMetrics()
+		resp.Messages = messageDebug{Processed: p, Applied: a, Dropped: d}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		hs.logger.Error(context.Background(), fmt.Sprintf("Failed to encode debug status: %v", err))
+	}
 }
 
 // Start starts the health server
@@ -534,6 +591,9 @@ func main() {
 	// Create async message handler with caching and batching
 	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncConfig)
 
+	// Counters for replay/reconnect behavior, exposed at /debug.
+	replayStats := &ReplayStats{}
+
 	// Replay cursor: lets a reconnect resume from the last processed message
 	// instead of a full reload. Disable with REPLAY_DISABLED=true to revert to
 	// full-reload-on-reconnect behavior — a rollout safety switch, and the
@@ -559,12 +619,16 @@ func main() {
 			asyncLoaderConfig.PageSize, asyncLoaderConfig.CircuitBreakerThreshold, asyncLoaderConfig.CircuitBreakerTimeout,
 			asyncLoaderConfig.MaxConcurrentRequests, asyncLoaderConfig.RateLimitRPS))
 		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncLoaderConfig)
+		asyncHandler.SetStats(replayStats)
 		if replayCursor != nil {
 			asyncHandler.SetReplayCursor(replayCursor)
 			messageHandler.SetReloadFunc(asyncHandler.TriggerReload)
 			// If the cursor's in-flight set overflows (a gap that narrow replay can
 			// no longer close), fall back to a full reload.
-			replayCursor.SetOverflowHandler(func() { asyncHandler.TriggerReload(context.Background()) })
+			replayCursor.SetOverflowHandler(func() {
+				replayStats.IncOverflowEscalations()
+				asyncHandler.TriggerReload(context.Background())
+			})
 		}
 		connectionReadyHandlerFunc = asyncHandler.OnConnectionReady
 	} else {
@@ -591,8 +655,10 @@ func main() {
 	}
 
 	// Attach the datastream client to the already-running health server so
-	// readiness now reflects datastream connectivity and initial load.
+	// readiness now reflects datastream connectivity and initial load, and wire
+	// the replay introspection exposed at /debug.
 	healthServer.SetDatastreamClient(datastreamClient)
+	healthServer.SetReplayDebug(replayCursor, replayStats, messageHandler)
 
 	// Start the WebSocket connection
 	datastreamClient.Start()
@@ -639,9 +705,9 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
-				processed, dropped := messageHandler.GetMetrics()
+				processed, applied, dropped := messageHandler.GetMetrics()
 				if processed > 0 || dropped > 0 {
-					logger.Info(context.Background(), fmt.Sprintf("Message metrics: processed=%d, dropped=%d", processed, dropped))
+					logger.Info(context.Background(), fmt.Sprintf("Message metrics: processed=%d, applied=%d, dropped=%d", processed, applied, dropped))
 				}
 			case <-sigChan:
 				return

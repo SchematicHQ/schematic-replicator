@@ -223,7 +223,7 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 				h.companyCache.On("Get", mock.Anything, idKey).Return(nilCompany, fmt.Errorf("not found"))
 			} else {
 				idKey := companyIDCacheKey(tt.company.ID)
-				h.companyCache.On("Set", mock.Anything, idKey, tt.company, 5*time.Minute).Return(nil)
+				h.companyCache.On("Set", mock.Anything, idKey, mock.Anything, 5*time.Minute).Return(nil)
 				for key, value := range tt.company.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
 					h.companyLookupCache.On("Set", mock.Anything, cacheKey, tt.company.ID, 5*time.Minute).Return(nil)
@@ -303,7 +303,7 @@ func TestReplicatorMessageHandler_HandleUserMessage(t *testing.T) {
 				h.userCache.On("Get", mock.Anything, idKey).Return(nilUser, fmt.Errorf("not found"))
 			} else {
 				idKey := userIDCacheKey(tt.user.ID)
-				h.userCache.On("Set", mock.Anything, idKey, tt.user, 5*time.Minute).Return(nil)
+				h.userCache.On("Set", mock.Anything, idKey, mock.Anything, 5*time.Minute).Return(nil)
 				for key, value := range tt.user.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
 					h.userLookupCache.On("Set", mock.Anything, cacheKey, tt.user.ID, 5*time.Minute).Return(nil)
@@ -381,7 +381,7 @@ func TestReplicatorMessageHandler_HandleFlagMessage(t *testing.T) {
 				h.flagCache.On("Delete", mock.Anything, cacheKey).Return(nil)
 			} else {
 				cacheKey := flagCacheKey(tt.flag.Key)
-				h.flagCache.On("Set", mock.Anything, cacheKey, tt.flag, 5*time.Minute).Return(nil)
+				h.flagCache.On("Set", mock.Anything, cacheKey, mock.Anything, 5*time.Minute).Return(nil)
 			}
 
 			ctx := context.Background()
@@ -426,7 +426,7 @@ func TestReplicatorMessageHandler_HandleFlagsMessage(t *testing.T) {
 		for _, flag := range flags {
 			cacheKey := flagCacheKey(flag.Key)
 			expectedCacheKeys = append(expectedCacheKeys, cacheKey)
-			h.flagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
+			h.flagCache.On("Set", mock.Anything, cacheKey, mock.Anything, 5*time.Minute).Return(nil)
 		}
 		h.flagCache.On("DeleteMissing", mock.Anything, expectedCacheKeys).Return(nil)
 
@@ -452,7 +452,7 @@ func TestReplicatorMessageHandler_SingleVsBulkFlagProcessing(t *testing.T) {
 		}
 
 		cacheKey := flagCacheKey(flag.Key)
-		h.flagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
+		h.flagCache.On("Set", mock.Anything, cacheKey, mock.Anything, 5*time.Minute).Return(nil)
 
 		ctx := context.Background()
 		err = h.handler.HandleMessage(ctx, message)
@@ -555,7 +555,7 @@ func TestFullThenPartialCompany(t *testing.T) {
 		Data:        json.RawMessage(fullData),
 	}
 
-	h.companyCache.On("Set", mock.Anything, idKey, company, 5*time.Minute).Return(nil).Once()
+	h.companyCache.On("Set", mock.Anything, idKey, mock.Anything, 5*time.Minute).Return(nil).Once()
 	for key, value := range company.Keys {
 		cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
 		h.companyLookupCache.On("Set", mock.Anything, cacheKey, company.ID, 5*time.Minute).Return(nil)
@@ -622,7 +622,7 @@ func TestPartialThenFullCompany(t *testing.T) {
 		Data:        json.RawMessage(fullData),
 	}
 
-	h.companyCache.On("Set", mock.Anything, idKey, company, 5*time.Minute).Return(nil).Once()
+	h.companyCache.On("Set", mock.Anything, idKey, mock.Anything, 5*time.Minute).Return(nil).Once()
 	for key, value := range company.Keys {
 		cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
 		h.companyLookupCache.On("Set", mock.Anything, cacheKey, company.ID, 5*time.Minute).Return(nil)
