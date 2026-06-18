@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/schematichq/rulesengine"
 	schematicdatastreamws "github.com/schematichq/schematic-datastream-ws"
 	"github.com/stretchr/testify/assert"
@@ -1108,4 +1112,112 @@ func TestReloadSkippedWhileLoadInProgress(t *testing.T) {
 	close(release)
 	waitIdle(t, al)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&companyLoads), "overlapping reload must be skipped")
+}
+
+// --- Always-on pipeline validation (independent of replay) ---
+// These exercise the sharded routing + in-order batch collapse through the real
+// HandleMessage entry point against a miniredis-backed cache, with NO replay
+// cursor attached (the REPLAY_DISABLED path). They confirm the message-pipeline
+// rewrite is correct on its own, for clients that never use replay.
+
+func newRealCacheHandler(t *testing.T) (*AsyncReplicatorMessageHandler, BatchCacheProvider[*rulesengine.Company], context.Context) {
+	t.Helper()
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	// Buffers sized so the tests don't trip backpressure (which would legitimately
+	// drop messages); we're validating the routing/collapse, not the drop policy.
+	cfg := AsyncConfig{
+		NumWorkers:              4,
+		CompanyChannelSize:      500,
+		UserChannelSize:         500,
+		FlagsChannelSize:        500,
+		BatchSize:               10,
+		BatchTimeout:            20 * time.Millisecond,
+		CircuitBreakerThreshold: 5,
+		CircuitBreakerTimeout:   time.Second,
+	}
+	companies := NewRedisBatchCache[*rulesengine.Company](client, time.Minute)
+	h := NewAsyncReplicatorMessageHandler(
+		companies,
+		NewRedisBatchCache[*rulesengine.User](client, time.Minute),
+		NewRedisBatchCache[*rulesengine.Flag](client, time.Minute),
+		NewRedisBatchCache[string](client, time.Minute),
+		NewRedisBatchCache[string](client, time.Minute),
+		NewSchematicLogger(),
+		time.Minute,
+		cfg,
+	)
+	// No replay cursor: this is the replay-disabled / always-on path.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		h.Shutdown(ctx)
+	})
+	return h, companies, context.Background()
+}
+
+func sendCompanyMsg(t *testing.T, h *AsyncReplicatorMessageHandler, ctx context.Context, mt schematicdatastreamws.MessageType, id, basePlan string) {
+	t.Helper()
+	var data json.RawMessage
+	if mt == schematicdatastreamws.MessageTypePartial {
+		data = json.RawMessage(fmt.Sprintf(`{"base_plan_id":%q}`, basePlan))
+	} else {
+		c := &rulesengine.Company{ID: id, Keys: map[string]string{"key": "k-" + id}}
+		if basePlan != "" {
+			c.BasePlanID = &basePlan
+		}
+		b, err := json.Marshal(c)
+		require.NoError(t, err)
+		data = b
+	}
+	eid := id
+	require.NoError(t, h.HandleMessage(ctx, &schematicdatastreamws.DataStreamResp{
+		EntityType:  string(schematicdatastreamws.EntityTypeCompany),
+		MessageType: mt,
+		Data:        data,
+		EntityID:    &eid,
+	}))
+}
+
+// Full→full, full→partial, and full→delete sequences for the same entity must
+// produce the correct final cache state through the sharded async pipeline.
+func TestShardedPipelineAppliesInOrderWithoutReplay(t *testing.T) {
+	h, companies, ctx := newRealCacheHandler(t)
+
+	sendCompanyMsg(t, h, ctx, schematicdatastreamws.MessageTypeFull, "comp_a", "v1")
+	sendCompanyMsg(t, h, ctx, schematicdatastreamws.MessageTypeFull, "comp_a", "v2") // last write wins
+	sendCompanyMsg(t, h, ctx, schematicdatastreamws.MessageTypeFull, "comp_b", "v1")
+	sendCompanyMsg(t, h, ctx, schematicdatastreamws.MessageTypePartial, "comp_b", "v3") // merged onto v1
+	sendCompanyMsg(t, h, ctx, schematicdatastreamws.MessageTypeFull, "comp_c", "v1")
+	sendCompanyMsg(t, h, ctx, schematicdatastreamws.MessageTypeDelete, "comp_c", "") // removed
+
+	require.Eventually(t, func() bool {
+		a, _ := companies.Get(ctx, companyIDCacheKey("comp_a"))
+		b, _ := companies.Get(ctx, companyIDCacheKey("comp_b"))
+		_, cErr := companies.Get(ctx, companyIDCacheKey("comp_c"))
+		return a != nil && a.BasePlanID != nil && *a.BasePlanID == "v2" &&
+			b != nil && b.BasePlanID != nil && *b.BasePlanID == "v3" &&
+			errors.Is(cErr, redis.Nil)
+	}, 2*time.Second, 10*time.Millisecond, "sharded pipeline must apply each entity's ops in order")
+}
+
+// Sharding across workers must not drop or cross-contaminate entities.
+func TestShardedPipelineHandlesManyEntitiesWithoutLoss(t *testing.T) {
+	h, companies, ctx := newRealCacheHandler(t)
+	const n = 30
+	for i := 0; i < n; i++ {
+		sendCompanyMsg(t, h, ctx, schematicdatastreamws.MessageTypeFull, fmt.Sprintf("comp_%02d", i), fmt.Sprintf("v%d", i))
+	}
+	require.Eventually(t, func() bool {
+		for i := 0; i < n; i++ {
+			c, err := companies.Get(ctx, companyIDCacheKey(fmt.Sprintf("comp_%02d", i)))
+			if err != nil || c == nil || c.BasePlanID == nil || *c.BasePlanID != fmt.Sprintf("v%d", i) {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Second, 10*time.Millisecond, "every entity must be cached with its own value")
 }
