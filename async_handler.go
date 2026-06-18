@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"sync"
 	"time"
 
@@ -104,14 +105,22 @@ type MessageJob struct {
 	Message   *schematicdatastreamws.DataStreamResp
 	Timestamp time.Time
 	Retries   int
+	// EntityKey identifies the entity this message mutates. Messages for the
+	// same entity are routed to the same worker (see queue*Message) so they are
+	// applied in arrival (stream) order.
+	EntityKey string
 }
 
 // AsyncReplicatorMessageHandler handles messages asynchronously with worker pools
 type AsyncReplicatorMessageHandler struct {
-	// Message channels for each entity type
-	companyMsgChan chan *MessageJob
-	userMsgChan    chan *MessageJob
-	flagsMsgChan   chan *MessageJob
+	// Message channels for each entity type. Companies and users are sharded by
+	// entity key (one channel per worker) so a given entity is always handled by
+	// the same worker, preserving per-entity ordering. Flags use a single worker
+	// because bulk-flag snapshots affect the whole set and must stay ordered
+	// against single-flag updates.
+	companyMsgChans []chan *MessageJob
+	userMsgChans    []chan *MessageJob
+	flagsMsgChan    chan *MessageJob
 
 	// Worker pool controls
 	numWorkers int
@@ -199,13 +208,25 @@ func NewAsyncReplicatorMessageHandler(
 	config AsyncConfig,
 ) *AsyncReplicatorMessageHandler {
 
-	h := &AsyncReplicatorMessageHandler{
-		// Buffered channels to prevent blocking
-		companyMsgChan: make(chan *MessageJob, config.CompanyChannelSize),
-		userMsgChan:    make(chan *MessageJob, config.UserChannelSize),
-		flagsMsgChan:   make(chan *MessageJob, config.FlagsChannelSize),
+	numWorkers := config.NumWorkers
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	companyMsgChans := make([]chan *MessageJob, numWorkers)
+	userMsgChans := make([]chan *MessageJob, numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		companyMsgChans[i] = make(chan *MessageJob, config.CompanyChannelSize)
+		userMsgChans[i] = make(chan *MessageJob, config.UserChannelSize)
+	}
 
-		numWorkers:         config.NumWorkers,
+	h := &AsyncReplicatorMessageHandler{
+		// Per-worker channels for companies/users (sharded by entity key);
+		// a single buffered channel for flags.
+		companyMsgChans: companyMsgChans,
+		userMsgChans:    userMsgChans,
+		flagsMsgChan:    make(chan *MessageJob, config.FlagsChannelSize),
+
+		numWorkers:         numWorkers,
 		shutdown:           make(chan struct{}),
 		companiesCache:     companiesCache,
 		companyLookupCache: companyLookupCache,
@@ -243,18 +264,41 @@ func (h *AsyncReplicatorMessageHandler) startWorkerPools() {
 		go h.userWorker(ctx, i)
 	}
 
-	// Flags workers (fewer needed, less frequent updates)
-	flagsWorkers := h.numWorkers / 2
-	if flagsWorkers < 1 {
-		flagsWorkers = 1
-	}
-	for i := 0; i < flagsWorkers; i++ {
-		h.workerWg.Add(1)
-		go h.flagsWorker(ctx, i)
-	}
+	// A single flags worker keeps bulk-flag snapshots ordered against
+	// single-flag updates (bulk replaces the whole set).
+	h.workerWg.Add(1)
+	go h.flagsWorker(ctx, 0)
 
-	h.logger.Info(context.Background(), fmt.Sprintf("Started worker pools: %d company workers, %d user workers, %d flags workers",
-		h.numWorkers, h.numWorkers, flagsWorkers))
+	h.logger.Info(context.Background(), fmt.Sprintf("Started worker pools: %d company workers, %d user workers, 1 flags worker",
+		h.numWorkers, h.numWorkers))
+}
+
+// entityKeyForMessage derives the stable per-entity routing/grouping key for a
+// message: the explicit EntityID when set (always present on partials), else
+// the "id" field of the payload (full/delete carry the entity). Returns "" when
+// no key can be determined; such messages all hash to the same shard.
+func entityKeyForMessage(message *schematicdatastreamws.DataStreamResp) string {
+	if message.EntityID != nil && *message.EntityID != "" {
+		return *message.EntityID
+	}
+	var idOnly struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(message.Data, &idOnly); err == nil {
+		return idOnly.ID
+	}
+	return ""
+}
+
+// shardForKey maps an entity key to one of n worker shards. Empty keys map to
+// shard 0.
+func shardForKey(key string, n int) int {
+	if n <= 1 || key == "" {
+		return 0
+	}
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(key))
+	return int(hasher.Sum32() % uint32(n))
 }
 
 // HandleMessage dispatches messages to appropriate worker pools (non-blocking)
@@ -293,6 +337,7 @@ func (h *AsyncReplicatorMessageHandler) HandleMessage(ctx context.Context, messa
 		Message:   message,
 		Timestamp: time.Now(),
 		Retries:   0,
+		EntityKey: entityKeyForMessage(message),
 	}
 
 	// Route to appropriate worker pool based on entity type
@@ -317,22 +362,24 @@ func (h *AsyncReplicatorMessageHandler) HandleMessage(ctx context.Context, messa
 	}
 }
 
-// queueCompanyMessage queues a company message with backpressure handling
+// queueCompanyMessage queues a company message on its entity's shard with
+// backpressure handling.
 func (h *AsyncReplicatorMessageHandler) queueCompanyMessage(ctx context.Context, job *MessageJob) error {
+	ch := h.companyMsgChans[shardForKey(job.EntityKey, h.numWorkers)]
 	select {
-	case h.companyMsgChan <- job:
+	case ch <- job:
 		h.incrementProcessedMessages()
 		return nil
 	default:
 		// Channel full - implement backpressure strategy
 		h.logger.Warn(ctx, "Company message channel full, dropping oldest message")
 		select {
-		case <-h.companyMsgChan: // Remove oldest
+		case <-ch: // Remove oldest
 			h.incrementDroppedMessages()
 		default:
 		}
 		select {
-		case h.companyMsgChan <- job: // Try again
+		case ch <- job: // Try again
 			h.incrementProcessedMessages()
 			return nil
 		default:
@@ -342,21 +389,23 @@ func (h *AsyncReplicatorMessageHandler) queueCompanyMessage(ctx context.Context,
 	}
 }
 
-// queueUserMessage queues a user message with backpressure handling
+// queueUserMessage queues a user message on its entity's shard with
+// backpressure handling.
 func (h *AsyncReplicatorMessageHandler) queueUserMessage(ctx context.Context, job *MessageJob) error {
+	ch := h.userMsgChans[shardForKey(job.EntityKey, h.numWorkers)]
 	select {
-	case h.userMsgChan <- job:
+	case ch <- job:
 		h.incrementProcessedMessages()
 		return nil
 	default:
 		h.logger.Warn(ctx, "User message channel full, dropping oldest message")
 		select {
-		case <-h.userMsgChan:
+		case <-ch:
 			h.incrementDroppedMessages()
 		default:
 		}
 		select {
-		case h.userMsgChan <- job:
+		case ch <- job:
 			h.incrementProcessedMessages()
 			return nil
 		default:
@@ -401,8 +450,12 @@ func (h *AsyncReplicatorMessageHandler) Shutdown(ctx context.Context) error {
 	close(h.shutdown)
 
 	// Close message channels
-	close(h.companyMsgChan)
-	close(h.userMsgChan)
+	for _, ch := range h.companyMsgChans {
+		close(ch)
+	}
+	for _, ch := range h.userMsgChans {
+		close(ch)
+	}
 	close(h.flagsMsgChan)
 
 	// Wait for all workers to finish with timeout
@@ -468,7 +521,7 @@ func (h *AsyncReplicatorMessageHandler) companyWorker(ctx context.Context, worke
 			h.logger.Info(ctx, fmt.Sprintf("Company worker %d shutting down", workerID))
 			return
 
-		case job, ok := <-h.companyMsgChan:
+		case job, ok := <-h.companyMsgChans[workerID]:
 			if !ok {
 				// Channel closed, process remaining buffer and exit
 				if len(batchBuffer) > 0 {
@@ -517,7 +570,7 @@ func (h *AsyncReplicatorMessageHandler) userWorker(ctx context.Context, workerID
 			h.logger.Info(ctx, fmt.Sprintf("User worker %d shutting down", workerID))
 			return
 
-		case job, ok := <-h.userMsgChan:
+		case job, ok := <-h.userMsgChans[workerID]:
 			if !ok {
 				if len(batchBuffer) > 0 {
 					h.processBatchedUserMessages(ctx, batchBuffer)
@@ -590,7 +643,6 @@ func (h *AsyncReplicatorMessageHandler) flagsWorker(ctx context.Context, workerI
 	}
 }
 
-// processBatchedCompanyMessages processes a batch of company messages with circuit breaker
 // completeReplayJobs advances the replay cursor over a batch that has been
 // processed. Called only once a batch reaches the end of processing, so a batch
 // dropped early (circuit breaker open) leaves its stream IDs uncommitted and is
@@ -606,6 +658,12 @@ func (h *AsyncReplicatorMessageHandler) completeReplayJobs(jobs []*MessageJob) {
 	}
 }
 
+// processBatchedCompanyMessages applies a batch of company messages. Because a
+// worker only ever sees one entity's messages (sharded routing), the jobs for a
+// given company arrive in stream order; we collapse each company's ops in that
+// order to its final state, then issue one cache write or delete per company.
+// This preserves per-entity ordering (a full/partial/delete sequence is never
+// reordered by type) while still batching the resulting cache operations.
 func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx context.Context, jobs []*MessageJob) {
 	if len(jobs) == 0 {
 		return
@@ -617,67 +675,102 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 		return
 	}
 
-	// Group operations by type for better batching
-	var fulls []*rulesengine.Company
-	var partials []*MessageJob
-	var deletes []*rulesengine.Company
+	type companyState struct {
+		company *rulesengine.Company // latest known value (for cache or lookup-key cleanup)
+		present bool                 // final op leaves the entity present vs deleted
+		touched bool                 // a valid op was applied
+	}
+	order := make([]string, 0, len(jobs))
+	states := make(map[string]*companyState, len(jobs))
+	stateFor := func(key string) *companyState {
+		st, ok := states[key]
+		if !ok {
+			st = &companyState{}
+			states[key] = st
+			order = append(order, key)
+		}
+		return st
+	}
 
 	for _, job := range jobs {
+		st := stateFor(job.EntityKey)
 		switch job.Message.MessageType {
 		case schematicdatastreamws.MessageTypeFull:
 			company, err := h.parseCompanyMessage(job.Message)
-			if err != nil {
-				h.logger.Error(ctx, fmt.Sprintf("Failed to parse company message: %v", err))
+			if err != nil || company == nil {
+				if err != nil {
+					h.logger.Error(ctx, fmt.Sprintf("Failed to parse company message: %v", err))
+				}
 				continue
 			}
-			if company != nil {
-				fulls = append(fulls, company)
-			}
-		case schematicdatastreamws.MessageTypePartial:
-			partials = append(partials, job)
+			st.company, st.present, st.touched = company, true, true
 		case schematicdatastreamws.MessageTypeDelete:
 			company, err := h.parseCompanyMessage(job.Message)
-			if err != nil {
-				h.logger.Error(ctx, fmt.Sprintf("Failed to parse company message: %v", err))
+			if err != nil || company == nil {
+				if err != nil {
+					h.logger.Error(ctx, fmt.Sprintf("Failed to parse company message: %v", err))
+				}
 				continue
 			}
-			if company != nil {
-				deletes = append(deletes, company)
+			st.company, st.present, st.touched = company, false, true
+		case schematicdatastreamws.MessageTypePartial:
+			base := st.company
+			if !st.present || base == nil {
+				existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(job.EntityKey))
+				if existErr != nil || existing == nil {
+					h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial company '%s', skipping", job.EntityKey))
+					continue
+				}
+				base = existing
 			}
+			merged, mergeErr := datastream.PartialCompany(base, job.Message.Data)
+			if mergeErr != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company '%s': %v", job.EntityKey, mergeErr))
+				continue
+			}
+			st.company, st.present, st.touched = merged, true, true
 		}
 	}
 
-	// Batch full create/update operations
-	if len(fulls) > 0 {
-		if err := h.batchCacheCompanies(ctx, fulls); err != nil {
+	var toCache, toDelete []*rulesengine.Company
+	for _, key := range order {
+		st := states[key]
+		if !st.touched || st.company == nil {
+			continue
+		}
+		if st.present {
+			toCache = append(toCache, st.company)
+		} else {
+			toDelete = append(toDelete, st.company)
+		}
+	}
+
+	if len(toCache) > 0 {
+		if err := h.batchCacheCompanies(ctx, toCache); err != nil {
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch company cache failed: %v", err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
-			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d companies", len(fulls)))
+			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d companies", len(toCache)))
 		}
 	}
 
-	// Process partial updates individually (read-modify-write)
-	if len(partials) > 0 {
-		h.processPartialCompanyMessages(ctx, partials)
-	}
-
-	// Batch delete operations
-	if len(deletes) > 0 {
-		if err := h.batchDeleteCompanies(ctx, deletes); err != nil {
+	if len(toDelete) > 0 {
+		if err := h.batchDeleteCompanies(ctx, toDelete); err != nil {
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch company delete failed: %v", err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
-			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d companies", len(deletes)))
+			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d companies", len(toDelete)))
 		}
 	}
 
 	h.completeReplayJobs(jobs)
 }
 
-// processBatchedUserMessages processes a batch of user messages with circuit breaker
+// processBatchedUserMessages applies a batch of user messages, collapsing each
+// user's ops in arrival (stream) order to a final state. See
+// processBatchedCompanyMessages for the rationale.
 func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.Context, jobs []*MessageJob) {
 	if len(jobs) == 0 {
 		return
@@ -688,147 +781,97 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 		return
 	}
 
-	var fulls []*rulesengine.User
-	var partials []*MessageJob
-	var deletes []*rulesengine.User
+	type userState struct {
+		user    *rulesengine.User
+		present bool
+		touched bool
+	}
+	order := make([]string, 0, len(jobs))
+	states := make(map[string]*userState, len(jobs))
+	stateFor := func(key string) *userState {
+		st, ok := states[key]
+		if !ok {
+			st = &userState{}
+			states[key] = st
+			order = append(order, key)
+		}
+		return st
+	}
 
 	for _, job := range jobs {
+		st := stateFor(job.EntityKey)
 		switch job.Message.MessageType {
 		case schematicdatastreamws.MessageTypeFull:
 			user, err := h.parseUserMessage(job.Message)
-			if err != nil {
-				h.logger.Error(ctx, fmt.Sprintf("Failed to parse user message: %v", err))
+			if err != nil || user == nil {
+				if err != nil {
+					h.logger.Error(ctx, fmt.Sprintf("Failed to parse user message: %v", err))
+				}
 				continue
 			}
-			if user != nil {
-				fulls = append(fulls, user)
-			}
-		case schematicdatastreamws.MessageTypePartial:
-			partials = append(partials, job)
+			st.user, st.present, st.touched = user, true, true
 		case schematicdatastreamws.MessageTypeDelete:
 			user, err := h.parseUserMessage(job.Message)
-			if err != nil {
-				h.logger.Error(ctx, fmt.Sprintf("Failed to parse user message: %v", err))
+			if err != nil || user == nil {
+				if err != nil {
+					h.logger.Error(ctx, fmt.Sprintf("Failed to parse user message: %v", err))
+				}
 				continue
 			}
-			if user != nil {
-				deletes = append(deletes, user)
+			st.user, st.present, st.touched = user, false, true
+		case schematicdatastreamws.MessageTypePartial:
+			base := st.user
+			if !st.present || base == nil {
+				existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(job.EntityKey))
+				if existErr != nil || existing == nil {
+					h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial user '%s', skipping", job.EntityKey))
+					continue
+				}
+				base = existing
 			}
+			merged, mergeErr := datastream.PartialUser(base, job.Message.Data)
+			if mergeErr != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user '%s': %v", job.EntityKey, mergeErr))
+				continue
+			}
+			st.user, st.present, st.touched = merged, true, true
 		}
 	}
 
-	if len(fulls) > 0 {
-		if err := h.batchCacheUsers(ctx, fulls); err != nil {
+	var toCache, toDelete []*rulesengine.User
+	for _, key := range order {
+		st := states[key]
+		if !st.touched || st.user == nil {
+			continue
+		}
+		if st.present {
+			toCache = append(toCache, st.user)
+		} else {
+			toDelete = append(toDelete, st.user)
+		}
+	}
+
+	if len(toCache) > 0 {
+		if err := h.batchCacheUsers(ctx, toCache); err != nil {
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch user cache failed: %v", err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
-			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d users", len(fulls)))
+			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d users", len(toCache)))
 		}
 	}
 
-	// Process partial updates individually (read-modify-write)
-	if len(partials) > 0 {
-		h.processPartialUserMessages(ctx, partials)
-	}
-
-	if len(deletes) > 0 {
-		if err := h.batchDeleteUsers(ctx, deletes); err != nil {
+	if len(toDelete) > 0 {
+		if err := h.batchDeleteUsers(ctx, toDelete); err != nil {
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch user delete failed: %v", err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
-			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d users", len(deletes)))
+			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d users", len(toDelete)))
 		}
 	}
 
 	h.completeReplayJobs(jobs)
-}
-
-// processPartialCompanyMessages handles partial company updates individually via read-modify-write.
-func (h *AsyncReplicatorMessageHandler) processPartialCompanyMessages(ctx context.Context, jobs []*MessageJob) {
-	for _, job := range jobs {
-		if job.Message.EntityID == nil || *job.Message.EntityID == "" {
-			h.logger.Error(ctx, "Partial company message missing entity_id")
-			continue
-		}
-		id := *job.Message.EntityID
-
-		h.companyMu.Lock()
-		existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(id))
-		if existErr != nil || existing == nil {
-			h.companyMu.Unlock()
-			h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial company '%s', skipping", id))
-			continue
-		}
-		company, mergeErr := datastream.PartialCompany(existing, job.Message.Data)
-		if mergeErr != nil {
-			h.companyMu.Unlock()
-			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company '%s': %v", id, mergeErr))
-			continue
-		}
-
-		idKey := companyIDCacheKey(company.ID)
-		if err := h.companiesCache.Set(ctx, idKey, company, h.cacheTTL); err != nil {
-			h.companyMu.Unlock()
-			h.redisCircuitBreaker.RecordFailure()
-			h.logger.Error(ctx, fmt.Sprintf("Failed to cache partial company '%s': %v", id, err))
-			continue
-		}
-		for key, value := range company.Keys {
-			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
-			if err := h.companyLookupCache.Set(ctx, lookupKey, company.ID, h.cacheTTL); err != nil {
-				h.logger.Warn(ctx, fmt.Sprintf("Failed to cache company lookup key '%s': %v", lookupKey, err))
-			}
-		}
-		h.companyMu.Unlock()
-		h.redisCircuitBreaker.RecordSuccess()
-	}
-
-	h.logger.Debug(ctx, fmt.Sprintf("Processed %d partial company messages", len(jobs)))
-}
-
-// processPartialUserMessages handles partial user updates individually via read-modify-write.
-func (h *AsyncReplicatorMessageHandler) processPartialUserMessages(ctx context.Context, jobs []*MessageJob) {
-	for _, job := range jobs {
-		if job.Message.EntityID == nil || *job.Message.EntityID == "" {
-			h.logger.Error(ctx, "Partial user message missing entity_id")
-			continue
-		}
-		id := *job.Message.EntityID
-
-		h.userMu.Lock()
-		existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(id))
-		if existErr != nil || existing == nil {
-			h.userMu.Unlock()
-			h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial user '%s', skipping", id))
-			continue
-		}
-		user, mergeErr := datastream.PartialUser(existing, job.Message.Data)
-		if mergeErr != nil {
-			h.userMu.Unlock()
-			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user '%s': %v", id, mergeErr))
-			continue
-		}
-
-		idKey := userIDCacheKey(user.ID)
-		if err := h.usersCache.Set(ctx, idKey, user, h.cacheTTL); err != nil {
-			h.userMu.Unlock()
-			h.redisCircuitBreaker.RecordFailure()
-			h.logger.Error(ctx, fmt.Sprintf("Failed to cache partial user '%s': %v", id, err))
-			continue
-		}
-		for key, value := range user.Keys {
-			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
-			if err := h.userLookupCache.Set(ctx, lookupKey, user.ID, h.cacheTTL); err != nil {
-				h.logger.Warn(ctx, fmt.Sprintf("Failed to cache user lookup key '%s': %v", lookupKey, err))
-			}
-		}
-		h.userMu.Unlock()
-		h.redisCircuitBreaker.RecordSuccess()
-	}
-
-	h.logger.Debug(ctx, fmt.Sprintf("Processed %d partial user messages", len(jobs)))
 }
 
 // processBatchedFlagsMessages processes a batch of flags messages with circuit breaker
@@ -842,34 +885,23 @@ func (h *AsyncReplicatorMessageHandler) processBatchedFlagsMessages(ctx context.
 		return
 	}
 
-	// Group jobs by entity type for different processing
-	var bulkFlagsJobs []*MessageJob  // EntityTypeFlags
-	var singleFlagJobs []*MessageJob // EntityTypeFlag
-
+	// Apply flag messages in arrival (stream) order: a bulk-flags snapshot
+	// replaces the whole set, so it must not be reordered relative to the
+	// single-flag updates around it. The single flags worker keeps this order
+	// across batches too.
 	for _, job := range jobs {
+		var err error
 		switch job.Message.EntityType {
 		case string(schematicdatastreamws.EntityTypeFlags):
-			bulkFlagsJobs = append(bulkFlagsJobs, job)
+			err = h.processBulkFlagsMessage(ctx, job.Message)
 		case string(schematicdatastreamws.EntityTypeFlag):
-			singleFlagJobs = append(singleFlagJobs, job)
+			err = h.processSingleFlagMessage(ctx, job.Message)
+		default:
+			continue
 		}
-	}
-
-	// Process bulk flags messages (with missing flag deletion)
-	for _, job := range bulkFlagsJobs {
-		if err := h.processBulkFlagsMessage(ctx, job.Message); err != nil {
+		if err != nil {
 			h.redisCircuitBreaker.RecordFailure()
-			h.logger.Error(ctx, fmt.Sprintf("Failed to process bulk flags message: %v", err))
-		} else {
-			h.redisCircuitBreaker.RecordSuccess()
-		}
-	}
-
-	// Process single flag messages (without missing flag deletion)
-	for _, job := range singleFlagJobs {
-		if err := h.processSingleFlagMessage(ctx, job.Message); err != nil {
-			h.redisCircuitBreaker.RecordFailure()
-			h.logger.Error(ctx, fmt.Sprintf("Failed to process single flag message: %v", err))
+			h.logger.Error(ctx, fmt.Sprintf("Failed to process flags message (%s): %v", job.Message.EntityType, err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
 		}
