@@ -517,6 +517,9 @@ func main() {
 		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncLoaderConfig)
 		asyncHandler.SetReplayCursor(replayCursor)
 		messageHandler.SetReloadFunc(asyncHandler.TriggerReload)
+		// If the cursor's in-flight set overflows (a gap that narrow replay can
+		// no longer close), fall back to a full reload.
+		replayCursor.SetOverflowHandler(func() { asyncHandler.TriggerReload(context.Background()) })
 		connectionReadyHandlerFunc = asyncHandler.OnConnectionReady
 	} else {
 		logger.Info(context.Background(), "Using synchronous initial loading (default)")

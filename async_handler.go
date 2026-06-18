@@ -282,10 +282,11 @@ func (h *AsyncReplicatorMessageHandler) HandleMessage(ctx context.Context, messa
 		return nil
 	}
 
-	// Record the resume token so a reconnect can replay from the last message we
-	// processed instead of doing a full reload.
+	// Track the resume token so a reconnect can replay from the last message we
+	// have applied. The cursor is committed at apply time (see Complete calls in
+	// the batch processors), not here, so it never runs ahead of cache state.
 	if h.replayCursor != nil && message.StreamID != nil {
-		h.replayCursor.Record(*message.StreamID)
+		h.replayCursor.Track(*message.StreamID)
 	}
 
 	job := &MessageJob{
@@ -590,6 +591,21 @@ func (h *AsyncReplicatorMessageHandler) flagsWorker(ctx context.Context, workerI
 }
 
 // processBatchedCompanyMessages processes a batch of company messages with circuit breaker
+// completeReplayJobs advances the replay cursor over a batch that has been
+// processed. Called only once a batch reaches the end of processing, so a batch
+// dropped early (circuit breaker open) leaves its stream IDs uncommitted and is
+// recovered on the next reconnect's replay.
+func (h *AsyncReplicatorMessageHandler) completeReplayJobs(jobs []*MessageJob) {
+	if h.replayCursor == nil {
+		return
+	}
+	for _, job := range jobs {
+		if job.Message != nil && job.Message.StreamID != nil {
+			h.replayCursor.Complete(*job.Message.StreamID)
+		}
+	}
+}
+
 func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx context.Context, jobs []*MessageJob) {
 	if len(jobs) == 0 {
 		return
@@ -657,6 +673,8 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d companies", len(deletes)))
 		}
 	}
+
+	h.completeReplayJobs(jobs)
 }
 
 // processBatchedUserMessages processes a batch of user messages with circuit breaker
@@ -723,6 +741,8 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d users", len(deletes)))
 		}
 	}
+
+	h.completeReplayJobs(jobs)
 }
 
 // processPartialCompanyMessages handles partial company updates individually via read-modify-write.
@@ -854,6 +874,8 @@ func (h *AsyncReplicatorMessageHandler) processBatchedFlagsMessages(ctx context.
 			h.redisCircuitBreaker.RecordSuccess()
 		}
 	}
+
+	h.completeReplayJobs(jobs)
 }
 
 // parseCompanyMessage parses a company message from DataStreamResp
