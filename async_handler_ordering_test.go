@@ -115,13 +115,18 @@ func TestCompanyBatchDeleteThenFullCaches(t *testing.T) {
 
 func TestEntityKeyForMessage(t *testing.T) {
 	eid := "explicit-id"
-	withEntityID := &schematicdatastreamws.DataStreamResp{EntityID: &eid, Data: json.RawMessage(`{"id":"from-data"}`)}
+	sid := "5000-0"
+	// EntityID wins even when a StreamID is also present (the common case for
+	// company/user messages).
+	withEntityID := &schematicdatastreamws.DataStreamResp{EntityID: &eid, StreamID: &sid}
 	assert.Equal(t, "explicit-id", entityKeyForMessage(withEntityID), "EntityID wins when set")
 
-	fromData := &schematicdatastreamws.DataStreamResp{Data: json.RawMessage(`{"id":"from-data"}`)}
-	assert.Equal(t, "from-data", entityKeyForMessage(fromData), "falls back to payload id")
+	// No EntityID: fall back to the unique StreamID (never parses the payload).
+	streamOnly := &schematicdatastreamws.DataStreamResp{StreamID: &sid, Data: json.RawMessage(`{"id":"from-data"}`)}
+	assert.Equal(t, "5000-0", entityKeyForMessage(streamOnly), "falls back to StreamID, not the payload id")
 
-	none := &schematicdatastreamws.DataStreamResp{Data: json.RawMessage(`{}`)}
+	// Neither present: empty key (hashes to shard 0).
+	none := &schematicdatastreamws.DataStreamResp{Data: json.RawMessage(`{"id":"from-data"}`)}
 	assert.Equal(t, "", entityKeyForMessage(none))
 }
 

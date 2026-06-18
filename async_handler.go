@@ -274,18 +274,20 @@ func (h *AsyncReplicatorMessageHandler) startWorkerPools() {
 }
 
 // entityKeyForMessage derives the stable per-entity routing/grouping key for a
-// message: the explicit EntityID when set (always present on partials), else
-// the "id" field of the payload (full/delete carry the entity). Returns "" when
-// no key can be determined; such messages all hash to the same shard.
+// message. The server sets entity_id on every company and user message (full,
+// partial, and delete alike), so EntityID is the key for the entity types that
+// shard. We deliberately do not parse the payload here: this runs on the single
+// ingestion goroutine, and the worker parses the payload again, so a fallback
+// parse would scan large payloads twice on the hot path. When EntityID is absent
+// (flags, snapshots, subscription confirmations) we fall back to the unique
+// StreamID — never colliding two distinct entities onto one key — and finally to
+// "" (all such messages hash to shard 0; flags don't shard regardless).
 func entityKeyForMessage(message *schematicdatastreamws.DataStreamResp) string {
 	if message.EntityID != nil && *message.EntityID != "" {
 		return *message.EntityID
 	}
-	var idOnly struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(message.Data, &idOnly); err == nil {
-		return idOnly.ID
+	if message.StreamID != nil && *message.StreamID != "" {
+		return *message.StreamID
 	}
 	return ""
 }
