@@ -501,7 +501,8 @@ type ConnectionReadyHandler struct {
 	cacheTTL           time.Duration
 }
 
-// NewConnectionReadyHandler creates a new connection ready handler with synchronous loading (default)
+// NewConnectionReadyHandler creates a new connection ready handler with synchronous loading
+// (the legacy path, opt-in via USE_ASYNC_LOADING=false; does a full reload on every reconnect and has no replay)
 func NewConnectionReadyHandler(
 	schematicClient *client.Client,
 	wsClient *schematicdatastreamws.Client,

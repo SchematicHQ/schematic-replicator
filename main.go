@@ -546,11 +546,15 @@ func main() {
 		asyncConfig.CompanyChannelSize, asyncConfig.UserChannelSize, asyncConfig.FlagsChannelSize,
 		asyncConfig.CircuitBreakerThreshold, asyncConfig.CircuitBreakerTimeout))
 
-	// Parse async loading configuration
-	useAsyncLoading := false
+	// Parse async loading configuration. Async is the default: it loads once and
+	// resumes via replay on reconnect, avoiding the full-reload-on-every-reconnect
+	// behavior of the sync path (and replay is only wired on the async path). Opt
+	// into the legacy synchronous path with USE_ASYNC_LOADING=false (intended for
+	// small datasets / local development).
+	useAsyncLoading := true
 	if asyncLoadingStr := os.Getenv("USE_ASYNC_LOADING"); asyncLoadingStr != "" {
-		if asyncLoadingStr == "true" || asyncLoadingStr == "1" {
-			useAsyncLoading = true
+		if asyncLoadingStr == "false" || asyncLoadingStr == "0" {
+			useAsyncLoading = false
 		}
 	}
 
@@ -632,7 +636,7 @@ func main() {
 		}
 		connectionReadyHandlerFunc = asyncHandler.OnConnectionReady
 	} else {
-		logger.Info(context.Background(), "Using synchronous initial loading (default)")
+		logger.Info(context.Background(), "Using synchronous initial loading (USE_ASYNC_LOADING=false); replay is disabled on this path")
 		syncHandler = NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL)
 		connectionReadyHandlerFunc = syncHandler.OnConnectionReady
 	}
