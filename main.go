@@ -535,11 +535,19 @@ func main() {
 	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncConfig)
 
 	// Replay cursor: lets a reconnect resume from the last processed message
-	// instead of a full reload. Load any persisted value so a process restart
-	// can resume too.
-	replayCursor := NewReplayCursor(redisClient, logger)
-	replayCursor.Load(context.Background())
-	messageHandler.SetReplayCursor(replayCursor)
+	// instead of a full reload. Disable with REPLAY_DISABLED=true to revert to
+	// full-reload-on-reconnect behavior — a rollout safety switch, and the
+	// fallback when the datastream server doesn't support replay. When the
+	// cursor is nil, the handler skips Track/Complete and never sets ReplayFrom,
+	// so the server behaves exactly as it did before replay existed.
+	var replayCursor *ReplayCursor
+	if os.Getenv("REPLAY_DISABLED") == "true" {
+		logger.Info(context.Background(), "Replay disabled (REPLAY_DISABLED=true); reconnects will do a full reload")
+	} else {
+		replayCursor = NewReplayCursor(redisClient, logger)
+		replayCursor.Load(context.Background())
+		messageHandler.SetReplayCursor(replayCursor)
+	}
 
 	// Create connection ready handler (wsClient will be set later)
 	var connectionReadyHandlerFunc schematicdatastreamws.ConnectionReadyHandlerFunc
@@ -551,11 +559,13 @@ func main() {
 			asyncLoaderConfig.PageSize, asyncLoaderConfig.CircuitBreakerThreshold, asyncLoaderConfig.CircuitBreakerTimeout,
 			asyncLoaderConfig.MaxConcurrentRequests, asyncLoaderConfig.RateLimitRPS))
 		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncLoaderConfig)
-		asyncHandler.SetReplayCursor(replayCursor)
-		messageHandler.SetReloadFunc(asyncHandler.TriggerReload)
-		// If the cursor's in-flight set overflows (a gap that narrow replay can
-		// no longer close), fall back to a full reload.
-		replayCursor.SetOverflowHandler(func() { asyncHandler.TriggerReload(context.Background()) })
+		if replayCursor != nil {
+			asyncHandler.SetReplayCursor(replayCursor)
+			messageHandler.SetReloadFunc(asyncHandler.TriggerReload)
+			// If the cursor's in-flight set overflows (a gap that narrow replay can
+			// no longer close), fall back to a full reload.
+			replayCursor.SetOverflowHandler(func() { asyncHandler.TriggerReload(context.Background()) })
+		}
 		connectionReadyHandlerFunc = asyncHandler.OnConnectionReady
 	} else {
 		logger.Info(context.Background(), "Using synchronous initial loading (default)")
@@ -590,7 +600,9 @@ func main() {
 	// Periodically persist the replay cursor so a process restart can resume.
 	cursorCtx, cursorCancel := context.WithCancel(context.Background())
 	defer cursorCancel()
-	replayCursor.StartFlusher(cursorCtx, 5*time.Second)
+	if replayCursor != nil {
+		replayCursor.StartFlusher(cursorCtx, 5*time.Second)
+	}
 
 	// Start cache cleanup manager if enabled
 	if cacheCleanupManager != nil {

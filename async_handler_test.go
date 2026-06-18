@@ -892,3 +892,220 @@ func TestAsyncReplicatorMessageHandler_ConcurrentAccess(t *testing.T) {
 		assert.True(t, processed > 0, "Expected some messages to be processed")
 	})
 }
+
+func newOrderingHandler(t *testing.T) (*AsyncReplicatorMessageHandler, *MockBatchCacheProvider[*rulesengine.Company]) {
+	t.Helper()
+	companyCache := NewMockBatchCacheProvider[*rulesengine.Company]()
+	companyLookupCache := NewMockBatchCacheProvider[string]()
+	// Permissive lookup-cache expectations; the ID cache is asserted per test.
+	companyLookupCache.On("BatchSet", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	companyLookupCache.On("BatchDelete", mock.Anything, mock.Anything).Return(nil)
+
+	h := NewAsyncReplicatorMessageHandler(
+		companyCache,
+		NewMockBatchCacheProvider[*rulesengine.User](),
+		NewMockCacheProvider[*rulesengine.Flag](),
+		companyLookupCache,
+		NewMockBatchCacheProvider[string](),
+		NewSchematicLogger(),
+		5*time.Minute,
+		createTestAsyncConfig(),
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		h.Shutdown(ctx)
+	})
+	return h, companyCache
+}
+
+func companyJob(t *testing.T, id string, mt schematicdatastreamws.MessageType, basePlan string) *MessageJob {
+	t.Helper()
+	c := &rulesengine.Company{ID: id, Keys: map[string]string{"key": "val-" + id}}
+	if basePlan != "" {
+		c.BasePlanID = &basePlan
+	}
+	data, err := json.Marshal(c)
+	require.NoError(t, err)
+	eid := id
+	return &MessageJob{
+		Message: &schematicdatastreamws.DataStreamResp{
+			EntityType:  string(schematicdatastreamws.EntityTypeCompany),
+			MessageType: mt,
+			Data:        data,
+			EntityID:    &eid,
+		},
+		EntityKey: id,
+	}
+}
+
+// Two fulls for the same company in one batch must collapse to the last one,
+// not be applied in arbitrary order.
+func TestCompanyBatchCollapsesToLastFull(t *testing.T) {
+	h, companyCache := newOrderingHandler(t)
+
+	var cached map[string]*rulesengine.Company
+	companyCache.On("BatchSet", mock.Anything, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) { cached = args.Get(1).(map[string]*rulesengine.Company) }).
+		Return(nil)
+
+	jobs := []*MessageJob{
+		companyJob(t, "c1", schematicdatastreamws.MessageTypeFull, "v1"),
+		companyJob(t, "c1", schematicdatastreamws.MessageTypeFull, "v2"),
+	}
+	h.processBatchedCompanyMessages(context.Background(), jobs)
+
+	companyCache.AssertNotCalled(t, "BatchDelete", mock.Anything, mock.Anything)
+	require.Len(t, cached, 1)
+	got := cached[companyIDCacheKey("c1")]
+	require.NotNil(t, got)
+	require.NotNil(t, got.BasePlanID)
+	assert.Equal(t, "v2", *got.BasePlanID, "last full in the batch must win")
+}
+
+// full → delete in one batch must leave the company deleted, not cached.
+func TestCompanyBatchFullThenDeleteDeletes(t *testing.T) {
+	h, companyCache := newOrderingHandler(t)
+	companyCache.On("BatchDelete", mock.Anything, mock.Anything).Return(nil)
+
+	jobs := []*MessageJob{
+		companyJob(t, "c1", schematicdatastreamws.MessageTypeFull, "v1"),
+		companyJob(t, "c1", schematicdatastreamws.MessageTypeDelete, ""),
+	}
+	h.processBatchedCompanyMessages(context.Background(), jobs)
+
+	companyCache.AssertNotCalled(t, "BatchSet", mock.Anything, mock.Anything, mock.Anything)
+	companyCache.AssertCalled(t, "BatchDelete", mock.Anything, mock.Anything)
+}
+
+// delete → full in one batch (re-create) must leave the company present.
+func TestCompanyBatchDeleteThenFullCaches(t *testing.T) {
+	h, companyCache := newOrderingHandler(t)
+	companyCache.On("BatchSet", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	jobs := []*MessageJob{
+		companyJob(t, "c1", schematicdatastreamws.MessageTypeDelete, ""),
+		companyJob(t, "c1", schematicdatastreamws.MessageTypeFull, "v2"),
+	}
+	h.processBatchedCompanyMessages(context.Background(), jobs)
+
+	companyCache.AssertNotCalled(t, "BatchDelete", mock.Anything, mock.Anything)
+	companyCache.AssertCalled(t, "BatchSet", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestEntityKeyForMessage(t *testing.T) {
+	eid := "explicit-id"
+	sid := "5000-0"
+	// EntityID wins even when a StreamID is also present (the common case for
+	// company/user messages).
+	withEntityID := &schematicdatastreamws.DataStreamResp{EntityID: &eid, StreamID: &sid}
+	assert.Equal(t, "explicit-id", entityKeyForMessage(withEntityID), "EntityID wins when set")
+
+	// No EntityID: fall back to the unique StreamID (never parses the payload).
+	streamOnly := &schematicdatastreamws.DataStreamResp{StreamID: &sid, Data: json.RawMessage(`{"id":"from-data"}`)}
+	assert.Equal(t, "5000-0", entityKeyForMessage(streamOnly), "falls back to StreamID, not the payload id")
+
+	// Neither present: empty key (hashes to shard 0).
+	none := &schematicdatastreamws.DataStreamResp{Data: json.RawMessage(`{"id":"from-data"}`)}
+	assert.Equal(t, "", entityKeyForMessage(none))
+}
+
+func TestShardForKeyIsStableAndBounded(t *testing.T) {
+	const n = 4
+	first := shardForKey("company-abc", n)
+	for i := 0; i < 100; i++ {
+		assert.Equal(t, first, shardForKey("company-abc", n), "same key must always map to the same shard")
+	}
+	for _, k := range []string{"a", "b", "c", "xyz", "company-123"} {
+		s := shardForKey(k, n)
+		assert.GreaterOrEqual(t, s, 0)
+		assert.Less(t, s, n)
+	}
+	assert.Equal(t, 0, shardForKey("", n), "empty key maps to shard 0")
+	assert.Equal(t, 0, shardForKey("anything", 1))
+}
+
+// newTestLoader builds a loader with no real API/cache dependencies. Callers
+// override loadCompaniesFn/loadUsersFn to observe load runs.
+func newTestLoader(t *testing.T) *AsyncInitialLoader {
+	t.Helper()
+	return NewAsyncInitialLoader(nil, nil, nil, nil, nil, NewSchematicLogger(), time.Minute, DefaultAsyncLoaderConfig())
+}
+
+func waitIdle(t *testing.T, al *AsyncInitialLoader) {
+	t.Helper()
+	require.Eventually(t, func() bool { return !al.loadingActive() }, time.Second, time.Millisecond, "load run did not finish")
+}
+
+// TestStartAsyncLoadingOnlyRunsOnce verifies the once-guard: OnConnectionReady
+// calls StartAsyncLoading on every reconnect, but only the first call may
+// trigger a bulk load — reconnects rely on replay instead.
+func TestStartAsyncLoadingOnlyRunsOnce(t *testing.T) {
+	ctx := context.Background()
+	al := newTestLoader(t)
+
+	var companyLoads, userLoads int32
+	al.loadCompaniesFn = func(context.Context) error { atomic.AddInt32(&companyLoads, 1); return nil }
+	al.loadUsersFn = func(context.Context) error { atomic.AddInt32(&userLoads, 1); return nil }
+
+	al.StartAsyncLoading(ctx)
+	waitIdle(t, al)
+	al.StartAsyncLoading(ctx)
+	al.StartAsyncLoading(ctx)
+	waitIdle(t, al)
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&companyLoads), "StartAsyncLoading must load only once")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&userLoads), "StartAsyncLoading must load only once")
+}
+
+// TestReloadForcesFreshLoad is the regression test for the dead reload path:
+// Reload must trigger a real bulk load even after the initial load has run.
+func TestReloadForcesFreshLoad(t *testing.T) {
+	ctx := context.Background()
+	al := newTestLoader(t)
+
+	var companyLoads, userLoads int32
+	al.loadCompaniesFn = func(context.Context) error { atomic.AddInt32(&companyLoads, 1); return nil }
+	al.loadUsersFn = func(context.Context) error { atomic.AddInt32(&userLoads, 1); return nil }
+
+	al.StartAsyncLoading(ctx)
+	waitIdle(t, al)
+
+	al.Reload(ctx)
+	waitIdle(t, al)
+	al.Reload(ctx)
+	waitIdle(t, al)
+
+	// Initial load + two reloads = three runs.
+	assert.Equal(t, int32(3), atomic.LoadInt32(&companyLoads))
+	assert.Equal(t, int32(3), atomic.LoadInt32(&userLoads))
+}
+
+// TestReloadSkippedWhileLoadInProgress verifies overlapping runs are guarded so
+// two loads never write the same caches concurrently.
+func TestReloadSkippedWhileLoadInProgress(t *testing.T) {
+	ctx := context.Background()
+	al := newTestLoader(t)
+
+	release := make(chan struct{})
+	var started sync.WaitGroup
+	started.Add(1)
+	var startedOnce sync.Once
+	var companyLoads int32
+	al.loadCompaniesFn = func(context.Context) error {
+		atomic.AddInt32(&companyLoads, 1)
+		startedOnce.Do(started.Done)
+		<-release // block until the test lets the run finish
+		return nil
+	}
+	al.loadUsersFn = func(context.Context) error { return nil }
+
+	al.Reload(ctx) // first run begins and blocks in loadCompaniesFn
+	started.Wait() // ensure the run is in progress
+	al.Reload(ctx) // second run must be skipped while the first is active
+	assert.True(t, al.loadingActive())
+
+	close(release)
+	waitIdle(t, al)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&companyLoads), "overlapping reload must be skipped")
+}
