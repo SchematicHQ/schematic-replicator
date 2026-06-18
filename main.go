@@ -114,6 +114,15 @@ func NewHealthServer(port int, datastreamClient *schematicdatastreamws.Client, r
 	return hs
 }
 
+// SetDatastreamClient attaches the datastream client once it exists. The server
+// can be started before this (e.g. while waiting to acquire the writer lock):
+// until the client is set, /health reports alive and /ready reports not-ready.
+func (hs *HealthServer) SetDatastreamClient(client *schematicdatastreamws.Client) {
+	hs.mu.Lock()
+	hs.datastreamClient = client
+	hs.mu.Unlock()
+}
+
 // Start starts the health server
 func (hs *HealthServer) Start() {
 	go func() {
@@ -346,6 +355,13 @@ func main() {
 		log.Fatalf("Redis connection failed: %v", err)
 	}
 
+	// Start the health server before acquiring the writer lock so probes get a
+	// response during a contended startup wait (rolling deploy / lease expiry):
+	// /health reports alive and /ready reports not-ready until setup completes.
+	// The datastream client is attached later via SetDatastreamClient.
+	healthServer := NewHealthServer(healthPort, nil, redisClient, logger)
+	healthServer.Start()
+
 	// Enforce the single-writer contract: only one instance may consume the
 	// datastream and write this Redis. Wait briefly for a previous writer to
 	// release (rolling deploy / lease expiry) before giving up. Disable with
@@ -564,9 +580,9 @@ func main() {
 		syncHandler.SetWebSocketClient(datastreamClient)
 	}
 
-	// Create and start health server
-	healthServer := NewHealthServer(healthPort, datastreamClient, redisClient, logger)
-	healthServer.Start()
+	// Attach the datastream client to the already-running health server so
+	// readiness now reflects datastream connectivity and initial load.
+	healthServer.SetDatastreamClient(datastreamClient)
 
 	// Start the WebSocket connection
 	datastreamClient.Start()
