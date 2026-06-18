@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/schematichq/rulesengine"
 	schematicdatastreamws "github.com/schematichq/schematic-datastream-ws"
 	schematicgo "github.com/schematichq/schematic-go"
@@ -660,6 +662,24 @@ func (h *AsyncReplicatorMessageHandler) completeReplayJobs(jobs []*MessageJob) {
 	}
 }
 
+// completeCommittableJobs advances the replay cursor only for jobs whose entity
+// was successfully applied (or was a genuine no-op). Jobs for an entity that
+// failed to apply — a cache write error, or a partial whose base couldn't be
+// read — are left uncommitted so the next reconnect's replay re-delivers them.
+func (h *AsyncReplicatorMessageHandler) completeCommittableJobs(jobs []*MessageJob, committable map[string]bool) {
+	if h.replayCursor == nil {
+		return
+	}
+	for _, job := range jobs {
+		if !committable[job.EntityKey] {
+			continue
+		}
+		if job.Message != nil && job.Message.StreamID != nil {
+			h.replayCursor.Complete(*job.Message.StreamID)
+		}
+	}
+}
+
 // processBatchedCompanyMessages applies a batch of company messages. Because a
 // worker only ever sees one entity's messages (sharded routing), the jobs for a
 // given company arrive in stream order; we collapse each company's ops in that
@@ -678,9 +698,10 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 	}
 
 	type companyState struct {
-		company *rulesengine.Company // latest known value (for cache or lookup-key cleanup)
-		present bool                 // final op leaves the entity present vs deleted
-		touched bool                 // a valid op was applied
+		company    *rulesengine.Company // latest known value (for cache or lookup-key cleanup)
+		present    bool                 // final op leaves the entity present vs deleted
+		touched    bool                 // a valid op was applied
+		readFailed bool                 // a partial couldn't read its base due to a cache error (not a genuine miss)
 	}
 	order := make([]string, 0, len(jobs))
 	states := make(map[string]*companyState, len(jobs))
@@ -705,7 +726,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 				}
 				continue
 			}
-			st.company, st.present, st.touched = company, true, true
+			st.company, st.present, st.touched, st.readFailed = company, true, true, false
 		case schematicdatastreamws.MessageTypeDelete:
 			company, err := h.parseCompanyMessage(job.Message)
 			if err != nil || company == nil {
@@ -714,27 +735,39 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 				}
 				continue
 			}
-			st.company, st.present, st.touched = company, false, true
+			st.company, st.present, st.touched, st.readFailed = company, false, true, false
 		case schematicdatastreamws.MessageTypePartial:
 			base := st.company
 			if !st.present || base == nil {
 				existing, existErr := h.companiesCache.Get(ctx, companyIDCacheKey(job.EntityKey))
-				if existErr != nil || existing == nil {
-					h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial company '%s', skipping", job.EntityKey))
+				switch {
+				case existErr == nil && existing != nil:
+					base = existing
+				case errors.Is(existErr, redis.Nil) || (existErr == nil && existing == nil):
+					// Genuine absence: the base full was dropped/aged-out (its own
+					// stream slot holds the cursor for replay) or the entity is
+					// deleted/never-existed. Either way, skipping is a correct no-op.
+					h.logger.Warn(ctx, fmt.Sprintf("No cached resource for partial company '%s', skipping", job.EntityKey))
+					continue
+				default:
+					// The base may be present but unreadable (transient cache error).
+					// Do not commit past this partial; hold so replay re-delivers it.
+					h.logger.Error(ctx, fmt.Sprintf("Failed to read base for partial company '%s': %v", job.EntityKey, existErr))
+					st.readFailed = true
 					continue
 				}
-				base = existing
 			}
 			merged, mergeErr := datastream.PartialCompany(base, job.Message.Data)
 			if mergeErr != nil {
 				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company '%s': %v", job.EntityKey, mergeErr))
 				continue
 			}
-			st.company, st.present, st.touched = merged, true, true
+			st.company, st.present, st.touched, st.readFailed = merged, true, true, false
 		}
 	}
 
 	var toCache, toDelete []*rulesengine.Company
+	var cacheKeys, deleteKeys []string
 	for _, key := range order {
 		st := states[key]
 		if !st.touched || st.company == nil {
@@ -742,8 +775,20 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 		}
 		if st.present {
 			toCache = append(toCache, st.company)
+			cacheKeys = append(cacheKeys, key)
 		} else {
 			toDelete = append(toDelete, st.company)
+			deleteKeys = append(deleteKeys, key)
+		}
+	}
+
+	// Track which entities we may advance the replay cursor for. A genuine no-op
+	// (skipped partial with no base) is committable; an entity whose write fails
+	// or whose base couldn't be read is held so replay re-delivers it.
+	committable := make(map[string]bool, len(order))
+	for _, key := range order {
+		if st := states[key]; !st.touched && !st.readFailed {
+			committable[key] = true
 		}
 	}
 
@@ -754,6 +799,9 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
 			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d companies", len(toCache)))
+			for _, key := range cacheKeys {
+				committable[key] = true
+			}
 		}
 	}
 
@@ -764,10 +812,13 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
 			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d companies", len(toDelete)))
+			for _, key := range deleteKeys {
+				committable[key] = true
+			}
 		}
 	}
 
-	h.completeReplayJobs(jobs)
+	h.completeCommittableJobs(jobs, committable)
 }
 
 // processBatchedUserMessages applies a batch of user messages, collapsing each
@@ -784,9 +835,10 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 	}
 
 	type userState struct {
-		user    *rulesengine.User
-		present bool
-		touched bool
+		user       *rulesengine.User
+		present    bool
+		touched    bool
+		readFailed bool
 	}
 	order := make([]string, 0, len(jobs))
 	states := make(map[string]*userState, len(jobs))
@@ -811,7 +863,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 				}
 				continue
 			}
-			st.user, st.present, st.touched = user, true, true
+			st.user, st.present, st.touched, st.readFailed = user, true, true, false
 		case schematicdatastreamws.MessageTypeDelete:
 			user, err := h.parseUserMessage(job.Message)
 			if err != nil || user == nil {
@@ -820,27 +872,38 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 				}
 				continue
 			}
-			st.user, st.present, st.touched = user, false, true
+			st.user, st.present, st.touched, st.readFailed = user, false, true, false
 		case schematicdatastreamws.MessageTypePartial:
 			base := st.user
 			if !st.present || base == nil {
 				existing, existErr := h.usersCache.Get(ctx, userIDCacheKey(job.EntityKey))
-				if existErr != nil || existing == nil {
-					h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial user '%s', skipping", job.EntityKey))
+				switch {
+				case existErr == nil && existing != nil:
+					base = existing
+				case errors.Is(existErr, redis.Nil) || (existErr == nil && existing == nil):
+					// Genuine absence — skipping is a correct no-op (see the
+					// company path for the rationale).
+					h.logger.Warn(ctx, fmt.Sprintf("No cached resource for partial user '%s', skipping", job.EntityKey))
+					continue
+				default:
+					// Present but unreadable (transient cache error): hold so
+					// replay re-delivers this partial.
+					h.logger.Error(ctx, fmt.Sprintf("Failed to read base for partial user '%s': %v", job.EntityKey, existErr))
+					st.readFailed = true
 					continue
 				}
-				base = existing
 			}
 			merged, mergeErr := datastream.PartialUser(base, job.Message.Data)
 			if mergeErr != nil {
 				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user '%s': %v", job.EntityKey, mergeErr))
 				continue
 			}
-			st.user, st.present, st.touched = merged, true, true
+			st.user, st.present, st.touched, st.readFailed = merged, true, true, false
 		}
 	}
 
 	var toCache, toDelete []*rulesengine.User
+	var cacheKeys, deleteKeys []string
 	for _, key := range order {
 		st := states[key]
 		if !st.touched || st.user == nil {
@@ -848,8 +911,17 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 		}
 		if st.present {
 			toCache = append(toCache, st.user)
+			cacheKeys = append(cacheKeys, key)
 		} else {
 			toDelete = append(toDelete, st.user)
+			deleteKeys = append(deleteKeys, key)
+		}
+	}
+
+	committable := make(map[string]bool, len(order))
+	for _, key := range order {
+		if st := states[key]; !st.touched && !st.readFailed {
+			committable[key] = true
 		}
 	}
 
@@ -860,6 +932,9 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
 			h.logger.Debug(ctx, fmt.Sprintf("Successfully cached %d users", len(toCache)))
+			for _, key := range cacheKeys {
+				committable[key] = true
+			}
 		}
 	}
 
@@ -870,10 +945,13 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
 			h.logger.Debug(ctx, fmt.Sprintf("Successfully deleted %d users", len(toDelete)))
+			for _, key := range deleteKeys {
+				committable[key] = true
+			}
 		}
 	}
 
-	h.completeReplayJobs(jobs)
+	h.completeCommittableJobs(jobs, committable)
 }
 
 // processBatchedFlagsMessages processes a batch of flags messages with circuit breaker
@@ -891,6 +969,10 @@ func (h *AsyncReplicatorMessageHandler) processBatchedFlagsMessages(ctx context.
 	// replaces the whole set, so it must not be reordered relative to the
 	// single-flag updates around it. The single flags worker keeps this order
 	// across batches too.
+	//
+	// Only advance the replay cursor for messages that applied (or were no-ops);
+	// a failed apply is held so the next reconnect's replay re-delivers it.
+	var doneJobs []*MessageJob
 	for _, job := range jobs {
 		var err error
 		switch job.Message.EntityType {
@@ -899,6 +981,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedFlagsMessages(ctx context.
 		case string(schematicdatastreamws.EntityTypeFlag):
 			err = h.processSingleFlagMessage(ctx, job.Message)
 		default:
+			doneJobs = append(doneJobs, job) // not a flag message we handle → no-op
 			continue
 		}
 		if err != nil {
@@ -906,10 +989,11 @@ func (h *AsyncReplicatorMessageHandler) processBatchedFlagsMessages(ctx context.
 			h.logger.Error(ctx, fmt.Sprintf("Failed to process flags message (%s): %v", job.Message.EntityType, err))
 		} else {
 			h.redisCircuitBreaker.RecordSuccess()
+			doneJobs = append(doneJobs, job)
 		}
 	}
 
-	h.completeReplayJobs(jobs)
+	h.completeReplayJobs(doneJobs)
 }
 
 // parseCompanyMessage parses a company message from DataStreamResp
