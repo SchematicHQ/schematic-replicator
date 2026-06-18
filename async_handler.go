@@ -1226,11 +1226,18 @@ type AsyncInitialLoader struct {
 	usersLoaded        bool
 	companiesLoadError error
 	usersLoadError     error
-	startOnce          sync.Once // Ensures loading only starts once
+	started            bool // the initial load has been kicked off (guards StartAsyncLoading)
+	loadingInProgress  bool // a load (initial or reload) is currently running
 
-	// Completion channels
+	// Completion channels. Recreated on every load run, so callers must snapshot
+	// them under loadingMu before selecting on them.
 	companiesLoadChan chan struct{}
 	usersLoadChan     chan struct{}
+
+	// Load implementations, injectable for tests. Default to the real
+	// API-backed loaders in NewAsyncInitialLoader.
+	loadCompaniesFn func(ctx context.Context) error
+	loadUsersFn     func(ctx context.Context) error
 
 	// Metrics
 	companiesLoadTime time.Duration
@@ -1352,7 +1359,7 @@ func NewAsyncInitialLoader(
 	cacheTTL time.Duration,
 	config AsyncLoaderConfig,
 ) *AsyncInitialLoader {
-	return &AsyncInitialLoader{
+	loader := &AsyncInitialLoader{
 		schematicClient:    schematicClient,
 		companiesCache:     companiesCache,
 		companyLookupCache: companyLookupCache,
@@ -1363,100 +1370,165 @@ func NewAsyncInitialLoader(
 		config:             config,
 		apiCircuitBreaker:  NewCircuitBreaker(config.CircuitBreakerThreshold, config.CircuitBreakerTimeout),
 		rateLimiter:        NewRateLimiter(config.RateLimitRPS),
-		companiesLoadChan:  make(chan struct{}),
-		usersLoadChan:      make(chan struct{}),
 		concurrencyLimit:   make(chan struct{}, config.MaxConcurrentRequests),
 	}
+	loader.loadCompaniesFn = loader.loadCompaniesAsync
+	loader.loadUsersFn = loader.loadUsersAsync
+	return loader
 }
 
-// StartAsyncLoading begins loading companies and users asynchronously
-// Returns immediately, allowing the connection to be established without waiting
+// StartAsyncLoading begins the initial load of companies and users exactly
+// once. It returns immediately so the connection can be established without
+// waiting. OnConnectionReady calls this on every (re)connect; subsequent calls
+// are no-ops because reconnects rely on replay rather than another bulk load.
 func (al *AsyncInitialLoader) StartAsyncLoading(ctx context.Context) {
-	al.startOnce.Do(func() {
-		al.logger.Info(ctx, "Starting asynchronous initial data loading")
+	al.loadingMu.Lock()
+	if al.started {
+		al.loadingMu.Unlock()
+		al.logger.Debug(ctx, "Initial data load already started; reconnects rely on replay")
+		return
+	}
+	al.started = true
+	al.loadingMu.Unlock()
 
-		// Start companies loading in background
-		go func() {
-			defer close(al.companiesLoadChan)
-			defer func() {
-				if r := recover(); r != nil {
-					al.logger.Error(ctx, fmt.Sprintf("Panic in companies loading goroutine: %v", r))
-					al.loadingMu.Lock()
-					al.companiesLoaded = true
-					al.companiesLoadError = fmt.Errorf("panic during companies loading: %v", r)
-					al.loadingMu.Unlock()
-				}
-			}()
+	al.runLoad(ctx)
+}
 
-			startTime := time.Now()
-			err := al.loadCompaniesAsync(ctx)
-			loadTime := time.Since(startTime)
+// Reload forces a fresh bulk load of companies and users, bypassing the
+// once-only guard on StartAsyncLoading. It is invoked when the server signals
+// MessageTypeReload (the replay window aged out), so the cache must be rebuilt
+// from scratch. Like StartAsyncLoading it returns immediately and is a no-op
+// while a load is already running.
+func (al *AsyncInitialLoader) Reload(ctx context.Context) {
+	al.runLoad(ctx)
+}
 
-			al.loadingMu.Lock()
-			al.companiesLoaded = true
-			al.companiesLoadError = err
-			al.companiesLoadTime = loadTime
-			al.loadingMu.Unlock()
+// runLoad performs one full load run in the background. It guards against
+// overlapping runs (a reload arriving mid-load, or repeated reload signals) so
+// concurrent runs never write the same caches at once, and recreates the
+// completion channels for this run.
+func (al *AsyncInitialLoader) runLoad(ctx context.Context) {
+	al.loadingMu.Lock()
+	if al.loadingInProgress {
+		al.loadingMu.Unlock()
+		al.logger.Warn(ctx, "Initial data load already in progress; skipping duplicate run")
+		return
+	}
+	al.loadingInProgress = true
+	al.companiesLoaded = false
+	al.usersLoaded = false
+	al.companiesLoadError = nil
+	al.usersLoadError = nil
+	companiesChan := make(chan struct{})
+	usersChan := make(chan struct{})
+	al.companiesLoadChan = companiesChan
+	al.usersLoadChan = usersChan
+	al.loadingMu.Unlock()
 
-			if err != nil {
-				al.logger.Error(ctx, fmt.Sprintf("Async companies loading failed after %v: %v", loadTime, err))
-			} else {
-				al.logger.Info(ctx, fmt.Sprintf("Async companies loading completed successfully in %v (%d companies)", loadTime, al.totalCompanies))
+	al.logger.Info(ctx, "Starting asynchronous data loading")
+
+	// Start companies loading in background
+	go func() {
+		defer close(companiesChan)
+		defer func() {
+			if r := recover(); r != nil {
+				al.logger.Error(ctx, fmt.Sprintf("Panic in companies loading goroutine: %v", r))
+				al.loadingMu.Lock()
+				al.companiesLoaded = true
+				al.companiesLoadError = fmt.Errorf("panic during companies loading: %v", r)
+				al.loadingMu.Unlock()
 			}
 		}()
 
-		// Start users loading in background
-		go func() {
-			defer close(al.usersLoadChan)
-			defer func() {
-				if r := recover(); r != nil {
-					al.logger.Error(ctx, fmt.Sprintf("Panic in users loading goroutine: %v", r))
-					al.loadingMu.Lock()
-					al.usersLoaded = true
-					al.usersLoadError = fmt.Errorf("panic during users loading: %v", r)
-					al.loadingMu.Unlock()
-				}
-			}()
+		startTime := time.Now()
+		err := al.loadCompaniesFn(ctx)
+		loadTime := time.Since(startTime)
 
-			startTime := time.Now()
-			err := al.loadUsersAsync(ctx)
-			loadTime := time.Since(startTime)
+		al.loadingMu.Lock()
+		al.companiesLoaded = true
+		al.companiesLoadError = err
+		al.companiesLoadTime = loadTime
+		al.loadingMu.Unlock()
 
-			al.loadingMu.Lock()
-			al.usersLoaded = true
-			al.usersLoadError = err
-			al.usersLoadTime = loadTime
-			al.loadingMu.Unlock()
+		if err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Async companies loading failed after %v: %v", loadTime, err))
+		} else {
+			al.logger.Info(ctx, fmt.Sprintf("Async companies loading completed successfully in %v (%d companies)", loadTime, al.totalCompanies))
+		}
+	}()
 
-			if err != nil {
-				al.logger.Error(ctx, fmt.Sprintf("Async users loading failed after %v: %v", loadTime, err))
-			} else {
-				al.logger.Info(ctx, fmt.Sprintf("Async users loading completed successfully in %v (%d users)", loadTime, al.totalUsers))
+	// Start users loading in background
+	go func() {
+		defer close(usersChan)
+		defer func() {
+			if r := recover(); r != nil {
+				al.logger.Error(ctx, fmt.Sprintf("Panic in users loading goroutine: %v", r))
+				al.loadingMu.Lock()
+				al.usersLoaded = true
+				al.usersLoadError = fmt.Errorf("panic during users loading: %v", r)
+				al.loadingMu.Unlock()
 			}
 		}()
 
-		al.logger.Info(ctx, "Async initial data loading started in background")
-	})
+		startTime := time.Now()
+		err := al.loadUsersFn(ctx)
+		loadTime := time.Since(startTime)
+
+		al.loadingMu.Lock()
+		al.usersLoaded = true
+		al.usersLoadError = err
+		al.usersLoadTime = loadTime
+		al.loadingMu.Unlock()
+
+		if err != nil {
+			al.logger.Error(ctx, fmt.Sprintf("Async users loading failed after %v: %v", loadTime, err))
+		} else {
+			al.logger.Info(ctx, fmt.Sprintf("Async users loading completed successfully in %v (%d users)", loadTime, al.totalUsers))
+		}
+	}()
+
+	// Clear the in-progress flag once both loads finish so a later reload can run.
+	go func() {
+		<-companiesChan
+		<-usersChan
+		al.loadingMu.Lock()
+		al.loadingInProgress = false
+		al.loadingMu.Unlock()
+	}()
+
+	al.logger.Info(ctx, "Async data loading started in background")
+}
+
+// loadingActive reports whether a load run is currently in progress.
+func (al *AsyncInitialLoader) loadingActive() bool {
+	al.loadingMu.RLock()
+	defer al.loadingMu.RUnlock()
+	return al.loadingInProgress
 }
 
 // WaitForCompletion waits for both companies and users to finish loading
 func (al *AsyncInitialLoader) WaitForCompletion(ctx context.Context) error {
 	al.logger.Info(ctx, "Waiting for async initial data loading to complete")
 
+	// Snapshot the completion channels; runLoad recreates them on every run.
+	al.loadingMu.RLock()
+	companiesLoadChan, usersLoadChan := al.companiesLoadChan, al.usersLoadChan
+	al.loadingMu.RUnlock()
+
 	// Wait for both to complete or context timeout
 	select {
-	case <-al.companiesLoadChan:
+	case <-companiesLoadChan:
 		// Companies done, wait for users
 		select {
-		case <-al.usersLoadChan:
+		case <-usersLoadChan:
 			// Both done
 		case <-ctx.Done():
 			return fmt.Errorf("context timeout waiting for users loading: %w", ctx.Err())
 		}
-	case <-al.usersLoadChan:
+	case <-usersLoadChan:
 		// Users done, wait for companies
 		select {
-		case <-al.companiesLoadChan:
+		case <-companiesLoadChan:
 			// Both done
 		case <-ctx.Done():
 			return fmt.Errorf("context timeout waiting for companies loading: %w", ctx.Err())
@@ -1465,10 +1537,9 @@ func (al *AsyncInitialLoader) WaitForCompletion(ctx context.Context) error {
 		return fmt.Errorf("context timeout waiting for initial loading: %w", ctx.Err())
 	}
 
-	// Clean up resources
-	if al.rateLimiter != nil {
-		al.rateLimiter.Close()
-	}
+	// Note: the rate limiter is intentionally left open — the loader is reused
+	// across reloads (MessageTypeReload), so it must outlive any single load run
+	// and is torn down only when the process exits.
 
 	// Check for errors
 	al.loadingMu.RLock()
@@ -1902,7 +1973,7 @@ func (h *AsyncConnectionReadyHandler) replayFrom() *string {
 // MessageTypeReload (resume token aged out).
 func (h *AsyncConnectionReadyHandler) TriggerReload(ctx context.Context) {
 	h.logger.Info(ctx, "Reloading initial data after replay window aged out")
-	h.asyncLoader.StartAsyncLoading(ctx)
+	h.asyncLoader.Reload(ctx)
 }
 
 // NewAsyncConnectionReadyHandler creates a new async connection ready handler
