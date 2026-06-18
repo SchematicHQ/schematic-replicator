@@ -346,6 +346,26 @@ func main() {
 		log.Fatalf("Redis connection failed: %v", err)
 	}
 
+	// Enforce the single-writer contract: only one instance may consume the
+	// datastream and write this Redis. Wait briefly for a previous writer to
+	// release (rolling deploy / lease expiry) before giving up. Disable with
+	// WRITER_LOCK_DISABLED=true (e.g. for future read-only instances).
+	var writerLock *WriterLock
+	var lockLost chan struct{}
+	var lockCancel context.CancelFunc
+	if os.Getenv("WRITER_LOCK_DISABLED") != "true" {
+		writerLock = NewWriterLock(redisClient, logger)
+		if err := writerLock.Acquire(context.Background(), 2*writerLock.ttl); err != nil {
+			log.Fatalf("Could not acquire writer lock (another replicator instance may be running against this Redis): %v", err)
+		}
+		lockLost = make(chan struct{})
+		var lockLostOnce sync.Once
+		var lockCtx context.Context
+		lockCtx, lockCancel = context.WithCancel(context.Background())
+		defer lockCancel()
+		go writerLock.KeepAlive(lockCtx, func() { lockLostOnce.Do(func() { close(lockLost) }) })
+	}
+
 	logger.Info(context.Background(), "Using Redis cache with batch support")
 	companiesCache = NewRedisBatchCache[*rulesengine.Company](redisClient, cacheTTL)
 	usersCache = NewRedisBatchCache[*rulesengine.User](redisClient, cacheTTL)
@@ -601,9 +621,15 @@ func main() {
 		}
 	}()
 
-	// Wait for shutdown signal
-	<-sigChan
-	logger.Info(context.Background(), "Received shutdown signal, closing connection...")
+	// Wait for a shutdown signal, or for the writer lock to be lost (another
+	// instance took over) — in which case we must stop to preserve the
+	// single-writer guarantee.
+	select {
+	case <-sigChan:
+		logger.Info(context.Background(), "Received shutdown signal, closing connection...")
+	case <-lockLost:
+		logger.Error(context.Background(), "Lost writer lock; shutting down to preserve the single-writer guarantee")
+	}
 
 	// Stop the cursor flusher (flushes once more) so the latest position is
 	// durable across the restart.
@@ -630,6 +656,14 @@ func main() {
 
 	// Close the WebSocket connection
 	datastreamClient.Close()
+
+	// Release the writer lock last, after we've stopped consuming and writing,
+	// so a replacement instance doesn't start writing while we're still flushing.
+	// Stop the renewer first so it can't re-extend the lease after we release.
+	if writerLock != nil {
+		lockCancel()
+		writerLock.Release(context.Background())
+	}
 
 	logger.Info(context.Background(), "Datastream replicator stopped")
 }
