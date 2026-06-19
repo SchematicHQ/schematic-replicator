@@ -1229,3 +1229,85 @@ func TestShardedPipelineHandlesManyEntitiesWithoutLoss(t *testing.T) {
 		return true
 	}, 2*time.Second, 10*time.Millisecond, "every entity must be cached with its own value")
 }
+
+// When a persisted cursor lets the replicator resume via replay, OnConnectionReady
+// calls MarkStarted instead of StartAsyncLoading: no bulk load on startup, and
+// reconnects stay skipped too — but the aged-out fallback (forced Reload) must
+// still run a full load.
+func TestMarkStartedSkipsLoadButAllowsReload(t *testing.T) {
+	ctx := context.Background()
+	al := newTestLoader(t)
+	var loads int32
+	al.loadCompaniesFn = func(context.Context) error { atomic.AddInt32(&loads, 1); return nil }
+	al.loadUsersFn = func(context.Context) error { return nil }
+
+	// Resume-via-replay path: mark started without loading.
+	al.MarkStarted()
+	// A subsequent (re)connect must not trigger a bulk load.
+	al.StartAsyncLoading(ctx)
+	waitIdle(t, al)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&loads), "MarkStarted + reconnect must not bulk-load")
+
+	// But an aged-out cursor (server MessageTypeReload) still forces a full reload.
+	al.Reload(ctx)
+	waitIdle(t, al)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&loads), "forced reload must still run after MarkStarted")
+}
+
+// A deleted company must be fully evicted — both its id-key and its lookup keys
+// — otherwise clients keep resolving a deleted company by key and serving it
+// (especially during an outage, since there's no TTL). This drives a full then a
+// delete through the real handler + a miniredis cache and asserts both key kinds
+// are gone.
+func TestCompanyDeleteEvictsIdAndLookupKeys(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	cfg := createTestAsyncConfig()
+	cfg.NumWorkers = 2
+	cfg.CompanyChannelSize = 100
+	h := NewAsyncReplicatorMessageHandler(
+		NewRedisBatchCache[*rulesengine.Company](client, time.Minute),
+		NewRedisBatchCache[*rulesengine.User](client, time.Minute),
+		NewRedisBatchCache[*rulesengine.Flag](client, time.Minute),
+		NewRedisBatchCache[string](client, time.Minute),
+		NewRedisBatchCache[string](client, time.Minute),
+		NewSchematicLogger(), time.Minute, cfg,
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		h.Shutdown(ctx)
+	})
+
+	ctx := context.Background()
+	company := &rulesengine.Company{ID: "comp_del", Keys: map[string]string{"clerkid": "org_DEL"}}
+	data, err := json.Marshal(company)
+	require.NoError(t, err)
+	eid := company.ID
+	msg := func(mt schematicdatastreamws.MessageType) *schematicdatastreamws.DataStreamResp {
+		return &schematicdatastreamws.DataStreamResp{
+			EntityType:  string(schematicdatastreamws.EntityTypeCompany),
+			MessageType: mt,
+			Data:        data,
+			EntityID:    &eid,
+		}
+	}
+
+	idKey := companyIDCacheKey("comp_del")
+	lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, "clerkid", "org_DEL")
+
+	// Full → both keys present.
+	require.NoError(t, h.HandleMessage(ctx, msg(schematicdatastreamws.MessageTypeFull)))
+	require.Eventually(t, func() bool {
+		return mr.Exists(idKey) && mr.Exists(lookupKey)
+	}, 2*time.Second, 10*time.Millisecond, "full should populate id-key and lookup-key")
+
+	// Delete → both keys evicted.
+	require.NoError(t, h.HandleMessage(ctx, msg(schematicdatastreamws.MessageTypeDelete)))
+	require.Eventually(t, func() bool {
+		return !mr.Exists(idKey) && !mr.Exists(lookupKey)
+	}, 2*time.Second, 10*time.Millisecond, "delete must evict both the id-key and the lookup-key")
+}

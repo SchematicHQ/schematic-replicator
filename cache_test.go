@@ -9,6 +9,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/schematichq/rulesengine"
+	"github.com/schematichq/rulesengine/typeconvert"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -843,4 +844,85 @@ func TestBatchCacheCompanies_IDBasedKeyspace_Integration(t *testing.T) {
 			assert.Equal(t, company.ID, resolved.ID)
 		}
 	}
+}
+
+// The replicator's whole purpose is that clients get correct flag-check answers
+// from the cache (notably during a Schematic outage). This test exercises the
+// exact client read path against a real Redis (miniredis): resolve a company by
+// its key (e.g. clerkid) -> company ID -> company, read the flag by key, then
+// run rulesengine.CheckFlag — and asserts the evaluation is correct. It also
+// implicitly covers conversion/round-trip fidelity: the flag's Rules/Conditions
+// (JSONSlice types that changed in rulesengine v0.1.18) must survive
+// marshal -> Redis -> unmarshal intact for the rule to evaluate.
+func TestFlagCheckThroughCache(t *testing.T) {
+	ctx := context.Background()
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	companies := NewRedisBatchCache[*rulesengine.Company](client, time.Minute)
+	companyLookup := NewRedisBatchCache[string](client, time.Minute)
+	flags := NewRedisBatchCache[*rulesengine.Flag](client, time.Minute)
+
+	// A flag that's off by default, with a company-override rule granting one
+	// specific company.
+	flag := &rulesengine.Flag{
+		ID:           "flag_x",
+		Key:          "premium-feature",
+		DefaultValue: false,
+		Rules: rulesengine.JSONSlice[*rulesengine.Rule]{
+			{
+				ID:       "rule_co",
+				RuleType: rulesengine.RuleTypeCompanyOverride,
+				Priority: 1,
+				Value:    true,
+				Conditions: rulesengine.JSONSlice[*rulesengine.Condition]{
+					{
+						ID:            "cond_co",
+						ConditionType: rulesengine.ConditionTypeCompany,
+						Operator:      typeconvert.ComparableOperatorEquals,
+						ResourceIDs:   rulesengine.JSONSlice[string]{"comp_granted"},
+					},
+				},
+			},
+		},
+	}
+
+	granted := &rulesengine.Company{ID: "comp_granted", Keys: map[string]string{"clerkid": "org_GRANTED"}}
+	other := &rulesengine.Company{ID: "comp_other", Keys: map[string]string{"clerkid": "org_OTHER"}}
+
+	// Populate the cache exactly as the replicator does: id-key + lookup-keys for
+	// companies, key for the flag.
+	for _, c := range []*rulesengine.Company{granted, other} {
+		require.NoError(t, companies.Set(ctx, companyIDCacheKey(c.ID), c, time.Minute))
+		for k, v := range c.Keys {
+			require.NoError(t, companyLookup.Set(ctx, resourceKeyToCacheKey(cacheKeyPrefixCompany, k, v), c.ID, time.Minute))
+		}
+	}
+	require.NoError(t, flags.Set(ctx, flagCacheKey(flag.Key), flag, time.Minute))
+
+	// checkByKey resolves a company by one of its keys and evaluates the flag —
+	// the client read path.
+	checkByKey := func(keyName, keyValue string) *rulesengine.CheckFlagResult {
+		id, err := companyLookup.Get(ctx, resourceKeyToCacheKey(cacheKeyPrefixCompany, keyName, keyValue))
+		require.NoError(t, err, "lookup key should resolve to a company ID")
+		company, err := companies.Get(ctx, companyIDCacheKey(id))
+		require.NoError(t, err)
+		f, err := flags.Get(ctx, flagCacheKey("premium-feature"))
+		require.NoError(t, err)
+		res, err := rulesengine.CheckFlag(ctx, company, nil, f)
+		require.NoError(t, err)
+		return res
+	}
+
+	grantedRes := checkByKey("clerkid", "org_GRANTED")
+	assert.True(t, grantedRes.Value, "granted company should evaluate true via the company-override rule; reason=%s", grantedRes.Reason)
+
+	otherRes := checkByKey("clerkid", "org_OTHER")
+	assert.False(t, otherRes.Value, "non-granted company should fall through to the default (false); reason=%s", otherRes.Reason)
+
+	// An unknown flag key is a cache miss → the SDK would fall back to the API.
+	_, err = flags.Get(ctx, flagCacheKey("does-not-exist"))
+	assert.ErrorIs(t, err, redis.Nil, "missing flag must be a clean cache miss")
 }

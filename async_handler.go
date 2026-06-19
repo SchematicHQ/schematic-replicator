@@ -659,10 +659,8 @@ func (h *AsyncReplicatorMessageHandler) flagsWorker(ctx context.Context, workerI
 	}
 }
 
-// completeReplayJobs advances the replay cursor over a batch that has been
-// processed. Called only once a batch reaches the end of processing, so a batch
-// dropped early (circuit breaker open) leaves its stream IDs uncommitted and is
-// recovered on the next reconnect's replay.
+// completeReplayJobs advances the replay cursor over a processed batch,
+// committing each message's stream ID so a reconnect resumes after it.
 func (h *AsyncReplicatorMessageHandler) completeReplayJobs(jobs []*MessageJob) {
 	h.incrementAppliedMessages(len(jobs))
 	if h.replayCursor == nil {
@@ -1547,6 +1545,17 @@ func (al *AsyncInitialLoader) StartAsyncLoading(ctx context.Context) {
 	al.runLoad(ctx)
 }
 
+// MarkStarted records that the initial-load decision has been made for this
+// process without running a bulk load — used when a persisted cursor lets us
+// resume via replay instead. It makes subsequent reconnects skip the bulk load
+// too (same as a normal StartAsyncLoading would). A forced Reload (e.g. on
+// MessageTypeReload) still runs, since it bypasses this guard.
+func (al *AsyncInitialLoader) MarkStarted() {
+	al.loadingMu.Lock()
+	al.started = true
+	al.loadingMu.Unlock()
+}
+
 // Reload forces a fresh bulk load of companies and users, bypassing the
 // once-only guard on StartAsyncLoading. It is invoked when the server signals
 // MessageTypeReload (the replay window aged out), so the cache must be rebuilt
@@ -2176,10 +2185,23 @@ func NewAsyncConnectionReadyHandler(
 
 // OnConnectionReady implements the ConnectionReadyHandler interface for asynchronous loading
 func (h *AsyncConnectionReadyHandler) OnConnectionReady(ctx context.Context) error {
-	// Async mode: start loading in background, establish connection quickly
 	h.stats.IncConnections()
-	h.logger.Info(ctx, "Starting async initial data loading for fast connection setup")
-	h.asyncLoader.StartAsyncLoading(ctx)
+
+	// If we already have a committed cursor, resume via replay instead of doing
+	// a full bulk load. The cursor and the cache live in the same Redis, so a
+	// present cursor means the cache is warm to that position; replay (below)
+	// catches up the rest. If the cursor has aged out of the server's retention
+	// window, the server answers the replay request with MessageTypeReload and we
+	// fall back to a full reload. This avoids a redundant API-read-replica storm
+	// on every process restart while the cache is already warm. (On a fresh start
+	// with no cursor, do the full bulk load.)
+	if h.replayCursor != nil && h.replayCursor.Get() != "" {
+		h.logger.Info(ctx, "Resuming from persisted replay cursor; skipping initial bulk load")
+		h.asyncLoader.MarkStarted()
+	} else {
+		h.logger.Info(ctx, "Starting async initial data loading for fast connection setup")
+		h.asyncLoader.StartAsyncLoading(ctx)
+	}
 
 	// 1. Subscribe to updates immediately (WebSocket connection is ready)
 	if err := h.subscribeToUpdates(ctx); err != nil {

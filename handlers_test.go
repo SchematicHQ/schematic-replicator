@@ -12,6 +12,7 @@ import (
 	schematicgo "github.com/schematichq/schematic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // normalizeFixture round-trips v through JSON so it matches what the message
@@ -676,4 +677,47 @@ func TestConvertToRulesEngineCompany_NilCreditBalances(t *testing.T) {
 	// Verify credit balances is initialized but empty
 	assert.NotNil(t, company.CreditBalances)
 	assert.Equal(t, 0, len(company.CreditBalances))
+}
+
+// Flag checks key on a company's plan/keys/traits, so the REST -> rulesengine
+// conversion must preserve those fields faithfully — a dropped or mismapped
+// field silently produces wrong flag-check answers. This is a golden test over
+// the flag-critical mappings in convertToRulesEngineCompany.
+func TestConvertCompanyPreservesFlagCriticalFields(t *testing.T) {
+	planVersion := "plnv_base"
+	addOnVersion := "plnv_addon"
+
+	data := &schematicgo.CompanyDetailResponseData{
+		ID:            "comp_golden",
+		EnvironmentID: "env_1",
+		Keys: []*schematicgo.EntityKeyDetailResponseData{
+			{Key: "clerkid", Value: "org_1"},
+			{Key: "email_domain", Value: "acme.com"},
+		},
+		Plan: &schematicgo.CompanyPlanWithBillingSubView{ID: "plan_base", PlanVersionID: &planVersion},
+		AddOns: []*schematicgo.CompanyPlanWithBillingSubView{
+			{ID: "plan_addon", PlanVersionID: &addOnVersion},
+		},
+		Plans: []*schematicgo.GenericPreviewObject{
+			{ID: "plan_base"},
+			{ID: "plan_addon"},
+		},
+	}
+
+	c := convertToRulesEngineCompany(data)
+	require.NotNil(t, c)
+
+	assert.Equal(t, "comp_golden", c.ID)
+	assert.Equal(t, "env_1", c.EnvironmentID)
+	assert.Equal(t, "org_1", c.Keys["clerkid"])
+	assert.Equal(t, "acme.com", c.Keys["email_domain"])
+
+	require.NotNil(t, c.BasePlanID)
+	assert.Equal(t, "plan_base", *c.BasePlanID, "base plan drives plan-based entitlements")
+
+	assert.Contains(t, c.PlanVersionIDs, "plnv_base", "plan version is a flag-rule input")
+	assert.Contains(t, c.PlanVersionIDs, "plnv_addon", "add-on plan versions must be included")
+
+	assert.Contains(t, c.PlanIDs, "plan_base")
+	assert.Contains(t, c.PlanIDs, "plan_addon")
 }
