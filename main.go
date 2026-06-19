@@ -165,6 +165,26 @@ func (hs *HealthServer) SetReplayDebug(cursor *ReplayCursor, stats *ReplayStats,
 	hs.mu.Unlock()
 }
 
+// debugReplay / debugMessages / debugResponse are the JSON shape of the /debug
+// endpoint.
+type debugReplay struct {
+	Enabled bool   `json:"enabled"`
+	Cursor  string `json:"cursor"`
+	ReplayStatsSnapshot
+}
+
+type debugMessages struct {
+	Processed int64 `json:"processed"`
+	Applied   int64 `json:"applied"`
+	Dropped   int64 `json:"dropped"`
+}
+
+type debugResponse struct {
+	Replay    debugReplay   `json:"replay"`
+	Messages  debugMessages `json:"messages"`
+	Timestamp time.Time     `json:"timestamp"`
+}
+
 // debugHandler exposes replay/processing introspection for operators and
 // integration tests: the committed cursor, reconnect/replay/reload counters, and
 // message-processing totals.
@@ -173,22 +193,8 @@ func (hs *HealthServer) debugHandler(w http.ResponseWriter, r *http.Request) {
 	cursor, stats, handler := hs.replayCursor, hs.replayStats, hs.msgHandler
 	hs.mu.RUnlock()
 
-	type replayDebug struct {
-		Enabled bool   `json:"enabled"`
-		Cursor  string `json:"cursor"`
-		ReplayStatsSnapshot
-	}
-	type messageDebug struct {
-		Processed int64 `json:"processed"`
-		Applied   int64 `json:"applied"`
-		Dropped   int64 `json:"dropped"`
-	}
-	resp := struct {
-		Replay    replayDebug  `json:"replay"`
-		Messages  messageDebug `json:"messages"`
-		Timestamp time.Time    `json:"timestamp"`
-	}{
-		Replay:    replayDebug{Enabled: cursor != nil, ReplayStatsSnapshot: stats.Snapshot()},
+	resp := debugResponse{
+		Replay:    debugReplay{Enabled: cursor != nil, ReplayStatsSnapshot: stats.Snapshot()},
 		Timestamp: time.Now(),
 	}
 	if cursor != nil {
@@ -196,7 +202,7 @@ func (hs *HealthServer) debugHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if handler != nil {
 		p, a, d := handler.GetMetrics()
-		resp.Messages = messageDebug{Processed: p, Applied: a, Dropped: d}
+		resp.Messages = debugMessages{Processed: p, Applied: a, Dropped: d}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
