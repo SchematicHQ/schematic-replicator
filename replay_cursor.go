@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,8 +57,10 @@ type ReplayCursor struct {
 }
 
 // NewReplayCursor builds a cursor backed by the given Redis client.
-func NewReplayCursor(redisClient redis.Cmdable, logger *SchematicLogger) *ReplayCursor {
-	key := os.Getenv("REPLAY_CURSOR_KEY")
+// NewReplayCursor builds a cursor backed by the given Redis client. key is the
+// Redis key to persist the cursor under; pass "" to use defaultReplayCursorKey.
+// (Reading the override from the environment is main's responsibility.)
+func NewReplayCursor(redisClient redis.Cmdable, logger *SchematicLogger, key string) *ReplayCursor {
 	if key == "" {
 		key = defaultReplayCursorKey
 	}

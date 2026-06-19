@@ -56,18 +56,16 @@ type WriterLock struct {
 	logger *SchematicLogger
 }
 
-// NewWriterLock builds a writer lock. The key and TTL are overridable via
-// WRITER_LOCK_KEY / WRITER_LOCK_TTL.
-func NewWriterLock(redisClient redis.Cmdable, logger *SchematicLogger) *WriterLock {
-	key := os.Getenv("WRITER_LOCK_KEY")
+// NewWriterLock builds a writer lock. key is the Redis key to hold the lease
+// under ("" → defaultWriterLockKey); ttl is the lease duration (<=0 →
+// defaultWriterLockTTL). Reading these overrides from the environment is main's
+// responsibility.
+func NewWriterLock(redisClient redis.Cmdable, logger *SchematicLogger, key string, ttl time.Duration) *WriterLock {
 	if key == "" {
 		key = defaultWriterLockKey
 	}
-	ttl := defaultWriterLockTTL
-	if v := os.Getenv("WRITER_LOCK_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			ttl = d
-		}
+	if ttl <= 0 {
+		ttl = defaultWriterLockTTL
 	}
 	return &WriterLock{
 		redis:  redisClient,

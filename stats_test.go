@@ -39,7 +39,7 @@ func TestReplayStatsSnapshot(t *testing.T) {
 func TestHealthServerDebugEndpoint(t *testing.T) {
 	hs := NewHealthServer(0, nil, nil, NewSchematicLogger())
 
-	cursor := NewReplayCursor(nil, NewSchematicLogger())
+	cursor := NewReplayCursor(nil, NewSchematicLogger(), "")
 	cursor.Track("500-0")
 	cursor.Complete("500-0")
 	stats := &ReplayStats{}

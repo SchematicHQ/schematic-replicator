@@ -23,7 +23,7 @@ func newTestReplayCursor(t *testing.T) (*ReplayCursor, *miniredis.Miniredis) {
 	require.NoError(t, err)
 	t.Cleanup(mr.Close)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	return NewReplayCursor(client, NewSchematicLogger()), mr
+	return NewReplayCursor(client, NewSchematicLogger(), ""), mr
 }
 
 // The cursor commits at apply time (Complete), not receive time (Track), so a
@@ -130,7 +130,7 @@ func TestReplayCursorFlushPersistsCommittedOnly(t *testing.T) {
 	assert.Equal(t, "150-3", got)
 
 	// A fresh cursor sharing the same Redis loads the persisted value on boot.
-	reloaded := NewReplayCursor(c.redis, NewSchematicLogger())
+	reloaded := NewReplayCursor(c.redis, NewSchematicLogger(), "")
 	reloaded.Load(ctx)
 	assert.Equal(t, "150-3", reloaded.Get())
 }
@@ -191,7 +191,7 @@ func TestReplayFromReflectsCursorState(t *testing.T) {
 
 	// Cursor attached but nothing committed yet → still no ReplayFrom (fresh
 	// start → full load).
-	cursor := NewReplayCursor(nil, NewSchematicLogger())
+	cursor := NewReplayCursor(nil, NewSchematicLogger(), "")
 	h.replayCursor = cursor
 	assert.Nil(t, h.replayFrom(), "uncommitted cursor must yield no ReplayFrom")
 
@@ -227,7 +227,7 @@ func newApplyHandler(t *testing.T) (*AsyncReplicatorMessageHandler, *MockBatchCa
 		defer cancel()
 		h.Shutdown(ctx)
 	})
-	cursor := NewReplayCursor(nil, NewSchematicLogger())
+	cursor := NewReplayCursor(nil, NewSchematicLogger(), "")
 	h.SetReplayCursor(cursor)
 	return h, companyCache, cursor
 }
@@ -343,7 +343,7 @@ func TestReplayCursorCommitsThroughHandler(t *testing.T) {
 		handler.Shutdown(ctx)
 	}()
 
-	cursor := NewReplayCursor(nil, logger) // in-memory only; no Redis needed
+	cursor := NewReplayCursor(nil, logger, "") // in-memory only; no Redis needed
 	handler.SetReplayCursor(cursor)
 
 	company := createAsyncTestCompany(t)

@@ -35,6 +35,32 @@ func valueOrUnknown(s string) string {
 	return s
 }
 
+// redisConfigFromEnv reads the Redis connection settings from the environment.
+// Keeping all env access in main means the rest of the package takes plain
+// config values.
+func redisConfigFromEnv() RedisConfig {
+	cfg := RedisConfig{
+		ClusterMode:              strings.EqualFold(os.Getenv("REDIS_CLUSTER_MODE"), "true"),
+		Addr:                     os.Getenv("REDIS_ADDR"),
+		Password:                 os.Getenv("REDIS_PASSWORD"),
+		TLS:                      os.Getenv("REDIS_TLS") == "true",
+		MaintenanceNotifications: os.Getenv("REDIS_ENABLE_MAINTENANCE_NOTIFICATIONS") == "true",
+	}
+	if dbStr := os.Getenv("REDIS_DB"); dbStr != "" {
+		if parsed, err := strconv.Atoi(dbStr); err == nil {
+			cfg.DB = parsed
+		}
+	}
+	if addrsStr := os.Getenv("REDIS_CLUSTER_ADDRS"); addrsStr != "" {
+		addrs := strings.Split(addrsStr, ",")
+		for i := range addrs {
+			addrs[i] = strings.TrimSpace(addrs[i])
+		}
+		cfg.ClusterAddrs = addrs
+	}
+	return cfg
+}
+
 const (
 	defaultAPIURL               = "https://api.schematichq.com"
 	apiKeyEnvVar                = "SCHEMATIC_API_KEY"
@@ -405,7 +431,7 @@ func main() {
 	var featuresCache CacheProvider[*rulesengine.Flag]
 
 	// Create Redis client - if this fails, the application will exit
-	redisClient := setupRedisClient()
+	redisClient := setupRedisClient(redisConfigFromEnv())
 
 	// Test Redis connection
 	if err := testRedisConnection(redisClient, logger); err != nil {
@@ -427,7 +453,13 @@ func main() {
 	var lockLost chan struct{}
 	var lockCancel context.CancelFunc
 	if os.Getenv("WRITER_LOCK_DISABLED") != "true" {
-		writerLock = NewWriterLock(redisClient, logger)
+		writerLockTTL := defaultWriterLockTTL
+		if v := os.Getenv("WRITER_LOCK_TTL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				writerLockTTL = d
+			}
+		}
+		writerLock = NewWriterLock(redisClient, logger, os.Getenv("WRITER_LOCK_KEY"), writerLockTTL)
 		if err := writerLock.Acquire(context.Background(), 2*writerLock.ttl); err != nil {
 			log.Fatalf("Could not acquire writer lock (another replicator instance may be running against this Redis): %v", err)
 		}
@@ -608,7 +640,7 @@ func main() {
 	if os.Getenv("REPLAY_DISABLED") == "true" {
 		logger.Info(context.Background(), "Replay disabled (REPLAY_DISABLED=true); reconnects will do a full reload")
 	} else {
-		replayCursor = NewReplayCursor(redisClient, logger)
+		replayCursor = NewReplayCursor(redisClient, logger, os.Getenv("REPLAY_CURSOR_KEY"))
 		replayCursor.Load(context.Background())
 		messageHandler.SetReplayCursor(replayCursor)
 	}
