@@ -295,6 +295,7 @@ func TestPartialReadErrorHoldsCursor(t *testing.T) {
 // A failed cache write must hold the cursor.
 func TestWriteFailureHoldsCursor(t *testing.T) {
 	h, companyCache, cursor := newApplyHandler(t)
+	companyCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.Company)(nil), redis.Nil)
 	companyCache.On("BatchSet", mock.Anything, mock.Anything, mock.Anything).Return(errors.New("write failed"))
 
 	cursor.Track("100-0")
@@ -330,6 +331,7 @@ func TestReplayCursorCommitsThroughHandler(t *testing.T) {
 	companyLookupCache := NewMockBatchCacheProvider[string]()
 	userLookupCache := NewMockBatchCacheProvider[string]()
 
+	companyCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.Company)(nil), redis.Nil)
 	companyCache.On("BatchSet", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	companyLookupCache.On("BatchSet", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 

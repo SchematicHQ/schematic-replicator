@@ -250,6 +250,7 @@ func TestAsyncReplicatorMessageHandler_CompanyBatchProcessing(t *testing.T) {
 		require.NoError(t, err)
 
 		// Set up expectation for batch operation on ID keys
+		mockCompanyCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.Company)(nil), redis.Nil)
 		mockCompanyCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.Company) bool {
 			// Should contain exactly 1 ID key per unique company
 			idKey := companyIDCacheKey(company.ID)
@@ -403,6 +404,7 @@ func TestAsyncReplicatorMessageHandler_UserBatchProcessing(t *testing.T) {
 		// Set up expectation for batch operation
 		// Use mock.MatchedBy to handle batch items
 		// Expect BatchSet on user cache with ID-based key (deduplicated)
+		mockUserCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.User)(nil), redis.Nil)
 		mockUserCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.User) bool {
 			if len(items) != 1 {
 				return false
@@ -706,6 +708,7 @@ func TestAsyncReplicatorMessageHandler_Metrics(t *testing.T) {
 		}
 
 		// Set up mock expectations (message might be processed)
+		mockCompanyCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.Company)(nil), redis.Nil)
 		mockCompanyCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.Company) bool {
 			return len(items) > 0
 		}), 5*time.Minute).Return(nil).Maybe()
@@ -756,6 +759,7 @@ func TestAsyncReplicatorMessageHandler_GracefulShutdown(t *testing.T) {
 		require.NoError(t, err)
 
 		// Set up mock expectations
+		mockCompanyCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.Company)(nil), redis.Nil)
 		mockCompanyCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.Company) bool {
 			return len(items) > 0
 		}), 5*time.Minute).Return(nil).Maybe()
@@ -864,6 +868,7 @@ func TestAsyncReplicatorMessageHandler_ConcurrentAccess(t *testing.T) {
 		}
 
 		// Set up mock expectations (may be called multiple times due to batching)
+		mockCompanyCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.Company)(nil), redis.Nil)
 		mockCompanyCache.On("BatchSet", mock.Anything, mock.MatchedBy(func(items map[string]*rulesengine.Company) bool {
 			return len(items) > 0
 		}), 5*time.Minute).Return(nil).Maybe()
@@ -957,6 +962,7 @@ func TestCompanyBatchCollapsesToLastFull(t *testing.T) {
 	h, companyCache := newOrderingHandler(t)
 
 	var cached map[string]*rulesengine.Company
+	companyCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.Company)(nil), redis.Nil)
 	companyCache.On("BatchSet", mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) { cached = args.Get(1).(map[string]*rulesengine.Company) }).
 		Return(nil)
@@ -993,6 +999,7 @@ func TestCompanyBatchFullThenDeleteDeletes(t *testing.T) {
 // delete → full in one batch (re-create) must leave the company present.
 func TestCompanyBatchDeleteThenFullCaches(t *testing.T) {
 	h, companyCache := newOrderingHandler(t)
+	companyCache.On("Get", mock.Anything, mock.Anything).Return((*rulesengine.Company)(nil), redis.Nil)
 	companyCache.On("BatchSet", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	jobs := []*MessageJob{
@@ -1310,4 +1317,58 @@ func TestCompanyDeleteEvictsIdAndLookupKeys(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return !mr.Exists(idKey) && !mr.Exists(lookupKey)
 	}, 2*time.Second, 10*time.Millisecond, "delete must evict both the id-key and the lookup-key")
+}
+
+// When a company's keys change (e.g. clerkid reassigned), the old lookup key must
+// be evicted so a lookup by the old key can't resolve the now-mismatched company
+// (the cache has no TTL). Two fulls for the same company in separate batches; the
+// first must land before the second so the eviction sees the prior keys.
+func TestCompanyKeyChangeEvictsOldLookupKey(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	cfg := createTestAsyncConfig()
+	cfg.NumWorkers = 2
+	cfg.CompanyChannelSize = 100
+	h := NewAsyncReplicatorMessageHandler(
+		NewRedisBatchCache[*rulesengine.Company](client, time.Minute),
+		NewRedisBatchCache[*rulesengine.User](client, time.Minute),
+		NewRedisBatchCache[*rulesengine.Flag](client, time.Minute),
+		NewRedisBatchCache[string](client, time.Minute),
+		NewRedisBatchCache[string](client, time.Minute),
+		NewSchematicLogger(), time.Minute, cfg,
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		h.Shutdown(ctx)
+	})
+
+	ctx := context.Background()
+	sendFull := func(keys map[string]string) {
+		c := &rulesengine.Company{ID: "comp_x", Keys: keys}
+		data, err := json.Marshal(c)
+		require.NoError(t, err)
+		eid := c.ID
+		require.NoError(t, h.HandleMessage(ctx, &schematicdatastreamws.DataStreamResp{
+			EntityType:  string(schematicdatastreamws.EntityTypeCompany),
+			MessageType: schematicdatastreamws.MessageTypeFull,
+			Data:        data,
+			EntityID:    &eid,
+		}))
+	}
+	oldLookup := resourceKeyToCacheKey(cacheKeyPrefixCompany, "clerkid", "org_OLD")
+	newLookup := resourceKeyToCacheKey(cacheKeyPrefixCompany, "clerkid", "org_NEW")
+
+	// First the company has clerkid=org_OLD; wait until it's cached so the next
+	// update is a separate batch that can see the prior keys.
+	sendFull(map[string]string{"clerkid": "org_OLD"})
+	require.Eventually(t, func() bool { return mr.Exists(oldLookup) }, 2*time.Second, 10*time.Millisecond)
+
+	// clerkid reassigned to org_NEW → new lookup present, old one evicted.
+	sendFull(map[string]string{"clerkid": "org_NEW"})
+	require.Eventually(t, func() bool { return mr.Exists(newLookup) && !mr.Exists(oldLookup) },
+		2*time.Second, 10*time.Millisecond, "old lookup key must be evicted after the clerkid changed")
 }

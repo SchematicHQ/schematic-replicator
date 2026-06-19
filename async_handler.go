@@ -1035,6 +1035,7 @@ func (h *AsyncReplicatorMessageHandler) batchCacheCompanies(ctx context.Context,
 	// Build batch maps for ID keys (full company) and lookup keys (company ID string)
 	idItems := make(map[string]*rulesengine.Company)
 	lookupItems := make(map[string]string)
+	var staleLookupKeys []string // lookup keys to evict because a company's keys changed
 
 	for _, company := range companies {
 		if company == nil || len(company.Keys) == 0 {
@@ -1046,9 +1047,25 @@ func (h *AsyncReplicatorMessageHandler) batchCacheCompanies(ctx context.Context,
 		idItems[idKey] = company
 
 		// Versioned lookup keys -> company ID string
+		newLookups := make(map[string]struct{}, len(company.Keys))
 		for key, value := range company.Keys {
 			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
 			lookupItems[lookupKey] = company.ID
+			newLookups[lookupKey] = struct{}{}
+		}
+
+		// If this company was already cached under different keys, evict the lookup
+		// keys it no longer has — otherwise a lookup by an old key resolves a stale
+		// company forever (the cache has no TTL). Read the prior value before the
+		// BatchSet below overwrites the ID key. Safe under per-entity worker
+		// affinity (only this worker writes a given company).
+		if prev, err := h.companiesCache.Get(ctx, idKey); err == nil && prev != nil {
+			for key, value := range prev.Keys {
+				old := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
+				if _, keep := newLookups[old]; !keep {
+					staleLookupKeys = append(staleLookupKeys, old)
+				}
+			}
 		}
 	}
 
@@ -1076,6 +1093,13 @@ func (h *AsyncReplicatorMessageHandler) batchCacheCompanies(ctx context.Context,
 		}
 	}
 
+	// Evict lookup keys the companies no longer have (keys changed).
+	if len(staleLookupKeys) > 0 {
+		if err := h.companyLookupCache.BatchDelete(ctx, staleLookupKeys); err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to evict stale company lookup keys: %v", err))
+		}
+	}
+
 	return nil
 }
 
@@ -1089,6 +1113,7 @@ func (h *AsyncReplicatorMessageHandler) batchCacheUsers(ctx context.Context, use
 	// Build batch maps for ID keys (full user) and lookup keys (user ID string)
 	idItems := make(map[string]*rulesengine.User)
 	lookupItems := make(map[string]string)
+	var staleLookupKeys []string // lookup keys to evict because a user's keys changed
 
 	for _, user := range users {
 		if user == nil || len(user.Keys) == 0 {
@@ -1100,9 +1125,22 @@ func (h *AsyncReplicatorMessageHandler) batchCacheUsers(ctx context.Context, use
 		idItems[idKey] = user
 
 		// Versioned lookup keys -> user ID string
+		newLookups := make(map[string]struct{}, len(user.Keys))
 		for key, value := range user.Keys {
 			lookupKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
 			lookupItems[lookupKey] = user.ID
+			newLookups[lookupKey] = struct{}{}
+		}
+
+		// Evict lookup keys this user no longer has (its keys changed), so a lookup
+		// by an old key can't resolve a stale user. See batchCacheCompanies.
+		if prev, err := h.usersCache.Get(ctx, idKey); err == nil && prev != nil {
+			for key, value := range prev.Keys {
+				old := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
+				if _, keep := newLookups[old]; !keep {
+					staleLookupKeys = append(staleLookupKeys, old)
+				}
+			}
 		}
 	}
 
@@ -1127,6 +1165,13 @@ func (h *AsyncReplicatorMessageHandler) batchCacheUsers(ctx context.Context, use
 	if len(lookupItems) > 0 {
 		if err := h.userLookupCache.BatchSet(ctx, lookupItems, h.cacheTTL); err != nil {
 			return fmt.Errorf("batch set user lookup keys: %w", err)
+		}
+	}
+
+	// Evict lookup keys the users no longer have (keys changed).
+	if len(staleLookupKeys) > 0 {
+		if err := h.userLookupCache.BatchDelete(ctx, staleLookupKeys); err != nil {
+			h.logger.Error(ctx, fmt.Sprintf("Failed to evict stale user lookup keys: %v", err))
 		}
 	}
 
