@@ -39,7 +39,7 @@ func (m *MockBatchCacheProvider[T]) BatchDelete(ctx context.Context, keys []stri
 // Test helper functions
 func createAsyncTestCompany(t *testing.T) *rulesengine.Company {
 	t.Helper()
-	return &rulesengine.Company{
+	return normalizeFixture(t, &rulesengine.Company{
 		ID:            "async-company-123",
 		AccountID:     "account-456",
 		EnvironmentID: "env-789",
@@ -56,12 +56,12 @@ func createAsyncTestCompany(t *testing.T) *rulesengine.Company {
 				},
 			},
 		},
-	}
+	})
 }
 
 func createAsyncTestUser(t *testing.T) *rulesengine.User {
 	t.Helper()
-	return &rulesengine.User{
+	return normalizeFixture(t, &rulesengine.User{
 		ID:            "async-user-123",
 		AccountID:     "account-456",
 		EnvironmentID: "env-789",
@@ -78,12 +78,12 @@ func createAsyncTestUser(t *testing.T) *rulesengine.User {
 				},
 			},
 		},
-	}
+	})
 }
 
 func createAsyncTestFlag(t *testing.T) *rulesengine.Flag {
 	t.Helper()
-	return &rulesengine.Flag{
+	return normalizeFixture(t, &rulesengine.Flag{
 		ID:            "async-flag-123",
 		AccountID:     "account-456",
 		EnvironmentID: "env-789",
@@ -99,7 +99,7 @@ func createAsyncTestFlag(t *testing.T) *rulesengine.Flag {
 				Value:         true,
 			},
 		},
-	}
+	})
 }
 
 func createTestAsyncConfig() AsyncConfig {

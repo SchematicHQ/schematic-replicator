@@ -14,6 +14,24 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
+// normalizeFixture round-trips v through JSON so it matches what the message
+// handlers cache. rulesengine (>=0.1.15) declares list fields as JSONSlice,
+// whose UnmarshalJSON turns nil/absent values into non-nil empty slices. The
+// handlers cache the result of unmarshaling the wire message, so an in-memory
+// fixture only compares equal to the handler's output after the same round-trip.
+func normalizeFixture[T any](t *testing.T, v T) T {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	var out T
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	return out
+}
+
 // MockCacheProvider is a mock implementation of CacheProvider for testing
 type MockCacheProvider[T any] struct {
 	mock.Mock
@@ -82,7 +100,7 @@ func newTestHarness(t *testing.T) *testHarness {
 // Test data helpers
 func createTestCompany(t *testing.T) *rulesengine.Company {
 	t.Helper()
-	return &rulesengine.Company{
+	return normalizeFixture(t, &rulesengine.Company{
 		ID:            "company-123",
 		AccountID:     "account-456",
 		EnvironmentID: "env-789",
@@ -99,12 +117,12 @@ func createTestCompany(t *testing.T) *rulesengine.Company {
 				},
 			},
 		},
-	}
+	})
 }
 
 func createTestUser(t *testing.T) *rulesengine.User {
 	t.Helper()
-	return &rulesengine.User{
+	return normalizeFixture(t, &rulesengine.User{
 		ID:            "user-123",
 		AccountID:     "account-456",
 		EnvironmentID: "env-789",
@@ -121,12 +139,12 @@ func createTestUser(t *testing.T) *rulesengine.User {
 				},
 			},
 		},
-	}
+	})
 }
 
 func createTestFlag(t *testing.T) *rulesengine.Flag {
 	t.Helper()
-	return &rulesengine.Flag{
+	return normalizeFixture(t, &rulesengine.Flag{
 		ID:            "flag-123",
 		AccountID:     "account-456",
 		EnvironmentID: "env-789",
@@ -142,7 +160,7 @@ func createTestFlag(t *testing.T) *rulesengine.Flag {
 				Value:         true,
 			},
 		},
-	}
+	})
 }
 
 func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
@@ -386,13 +404,13 @@ func TestReplicatorMessageHandler_HandleFlagsMessage(t *testing.T) {
 
 		flags := []*rulesengine.Flag{
 			createTestFlag(t),
-			{
+			normalizeFixture(t, &rulesengine.Flag{
 				ID:            "flag-456",
 				AccountID:     "account-456",
 				EnvironmentID: "env-789",
 				Key:           "another-feature",
 				DefaultValue:  true,
-			},
+			}),
 		}
 
 		flagsData, err := json.Marshal(flags)
