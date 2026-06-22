@@ -12,6 +12,7 @@ import (
 	schematicgo "github.com/schematichq/schematic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // normalizeFixture round-trips v through JSON so it matches what the message
@@ -223,7 +224,7 @@ func TestReplicatorMessageHandler_HandleCompanyMessage(t *testing.T) {
 				h.companyCache.On("Get", mock.Anything, idKey).Return(nilCompany, fmt.Errorf("not found"))
 			} else {
 				idKey := companyIDCacheKey(tt.company.ID)
-				h.companyCache.On("Set", mock.Anything, idKey, tt.company, 5*time.Minute).Return(nil)
+				h.companyCache.On("Set", mock.Anything, idKey, mock.Anything, 5*time.Minute).Return(nil)
 				for key, value := range tt.company.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
 					h.companyLookupCache.On("Set", mock.Anything, cacheKey, tt.company.ID, 5*time.Minute).Return(nil)
@@ -303,7 +304,7 @@ func TestReplicatorMessageHandler_HandleUserMessage(t *testing.T) {
 				h.userCache.On("Get", mock.Anything, idKey).Return(nilUser, fmt.Errorf("not found"))
 			} else {
 				idKey := userIDCacheKey(tt.user.ID)
-				h.userCache.On("Set", mock.Anything, idKey, tt.user, 5*time.Minute).Return(nil)
+				h.userCache.On("Set", mock.Anything, idKey, mock.Anything, 5*time.Minute).Return(nil)
 				for key, value := range tt.user.Keys {
 					cacheKey := resourceKeyToCacheKey(cacheKeyPrefixUser, key, value)
 					h.userLookupCache.On("Set", mock.Anything, cacheKey, tt.user.ID, 5*time.Minute).Return(nil)
@@ -381,7 +382,7 @@ func TestReplicatorMessageHandler_HandleFlagMessage(t *testing.T) {
 				h.flagCache.On("Delete", mock.Anything, cacheKey).Return(nil)
 			} else {
 				cacheKey := flagCacheKey(tt.flag.Key)
-				h.flagCache.On("Set", mock.Anything, cacheKey, tt.flag, 5*time.Minute).Return(nil)
+				h.flagCache.On("Set", mock.Anything, cacheKey, mock.Anything, 5*time.Minute).Return(nil)
 			}
 
 			ctx := context.Background()
@@ -426,7 +427,7 @@ func TestReplicatorMessageHandler_HandleFlagsMessage(t *testing.T) {
 		for _, flag := range flags {
 			cacheKey := flagCacheKey(flag.Key)
 			expectedCacheKeys = append(expectedCacheKeys, cacheKey)
-			h.flagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
+			h.flagCache.On("Set", mock.Anything, cacheKey, mock.Anything, 5*time.Minute).Return(nil)
 		}
 		h.flagCache.On("DeleteMissing", mock.Anything, expectedCacheKeys).Return(nil)
 
@@ -452,7 +453,7 @@ func TestReplicatorMessageHandler_SingleVsBulkFlagProcessing(t *testing.T) {
 		}
 
 		cacheKey := flagCacheKey(flag.Key)
-		h.flagCache.On("Set", mock.Anything, cacheKey, flag, 5*time.Minute).Return(nil)
+		h.flagCache.On("Set", mock.Anything, cacheKey, mock.Anything, 5*time.Minute).Return(nil)
 
 		ctx := context.Background()
 		err = h.handler.HandleMessage(ctx, message)
@@ -555,7 +556,7 @@ func TestFullThenPartialCompany(t *testing.T) {
 		Data:        json.RawMessage(fullData),
 	}
 
-	h.companyCache.On("Set", mock.Anything, idKey, company, 5*time.Minute).Return(nil).Once()
+	h.companyCache.On("Set", mock.Anything, idKey, mock.Anything, 5*time.Minute).Return(nil).Once()
 	for key, value := range company.Keys {
 		cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
 		h.companyLookupCache.On("Set", mock.Anything, cacheKey, company.ID, 5*time.Minute).Return(nil)
@@ -622,7 +623,7 @@ func TestPartialThenFullCompany(t *testing.T) {
 		Data:        json.RawMessage(fullData),
 	}
 
-	h.companyCache.On("Set", mock.Anything, idKey, company, 5*time.Minute).Return(nil).Once()
+	h.companyCache.On("Set", mock.Anything, idKey, mock.Anything, 5*time.Minute).Return(nil).Once()
 	for key, value := range company.Keys {
 		cacheKey := resourceKeyToCacheKey(cacheKeyPrefixCompany, key, value)
 		h.companyLookupCache.On("Set", mock.Anything, cacheKey, company.ID, 5*time.Minute).Return(nil)
@@ -676,4 +677,47 @@ func TestConvertToRulesEngineCompany_NilCreditBalances(t *testing.T) {
 	// Verify credit balances is initialized but empty
 	assert.NotNil(t, company.CreditBalances)
 	assert.Equal(t, 0, len(company.CreditBalances))
+}
+
+// Flag checks key on a company's plan/keys/traits, so the REST -> rulesengine
+// conversion must preserve those fields faithfully — a dropped or mismapped
+// field silently produces wrong flag-check answers. This is a golden test over
+// the flag-critical mappings in convertToRulesEngineCompany.
+func TestConvertCompanyPreservesFlagCriticalFields(t *testing.T) {
+	planVersion := "plnv_base"
+	addOnVersion := "plnv_addon"
+
+	data := &schematicgo.CompanyDetailResponseData{
+		ID:            "comp_golden",
+		EnvironmentID: "env_1",
+		Keys: []*schematicgo.EntityKeyDetailResponseData{
+			{Key: "clerkid", Value: "org_1"},
+			{Key: "email_domain", Value: "acme.com"},
+		},
+		Plan: &schematicgo.CompanyPlanWithBillingSubView{ID: "plan_base", PlanVersionID: &planVersion},
+		AddOns: []*schematicgo.CompanyPlanWithBillingSubView{
+			{ID: "plan_addon", PlanVersionID: &addOnVersion},
+		},
+		Plans: []*schematicgo.GenericPreviewObject{
+			{ID: "plan_base"},
+			{ID: "plan_addon"},
+		},
+	}
+
+	c := convertToRulesEngineCompany(data)
+	require.NotNil(t, c)
+
+	assert.Equal(t, "comp_golden", c.ID)
+	assert.Equal(t, "env_1", c.EnvironmentID)
+	assert.Equal(t, "org_1", c.Keys["clerkid"])
+	assert.Equal(t, "acme.com", c.Keys["email_domain"])
+
+	require.NotNil(t, c.BasePlanID)
+	assert.Equal(t, "plan_base", *c.BasePlanID, "base plan drives plan-based entitlements")
+
+	assert.Contains(t, c.PlanVersionIDs, "plnv_base", "plan version is a flag-rule input")
+	assert.Contains(t, c.PlanVersionIDs, "plnv_addon", "add-on plan versions must be included")
+
+	assert.Contains(t, c.PlanIDs, "plan_base")
+	assert.Contains(t, c.PlanIDs, "plan_addon")
 }

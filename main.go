@@ -35,6 +35,32 @@ func valueOrUnknown(s string) string {
 	return s
 }
 
+// redisConfigFromEnv reads the Redis connection settings from the environment.
+// Keeping all env access in main means the rest of the package takes plain
+// config values.
+func redisConfigFromEnv() RedisConfig {
+	cfg := RedisConfig{
+		ClusterMode:              strings.EqualFold(os.Getenv("REDIS_CLUSTER_MODE"), "true"),
+		Addr:                     os.Getenv("REDIS_ADDR"),
+		Password:                 os.Getenv("REDIS_PASSWORD"),
+		TLS:                      os.Getenv("REDIS_TLS") == "true",
+		MaintenanceNotifications: os.Getenv("REDIS_ENABLE_MAINTENANCE_NOTIFICATIONS") == "true",
+	}
+	if dbStr := os.Getenv("REDIS_DB"); dbStr != "" {
+		if parsed, err := strconv.Atoi(dbStr); err == nil {
+			cfg.DB = parsed
+		}
+	}
+	if addrsStr := os.Getenv("REDIS_CLUSTER_ADDRS"); addrsStr != "" {
+		addrs := strings.Split(addrsStr, ",")
+		for i := range addrs {
+			addrs[i] = strings.TrimSpace(addrs[i])
+		}
+		cfg.ClusterAddrs = addrs
+	}
+	return cfg
+}
+
 const (
 	defaultAPIURL               = "https://api.schematichq.com"
 	apiKeyEnvVar                = "SCHEMATIC_API_KEY"
@@ -54,6 +80,11 @@ type HealthServer struct {
 	logger           *SchematicLogger
 	server           *http.Server
 	mu               sync.RWMutex
+
+	// Replay introspection (optional; populated once replay components exist).
+	replayCursor *ReplayCursor
+	replayStats  *ReplayStats
+	msgHandler   *AsyncReplicatorMessageHandler
 }
 
 // HealthStatusType represents the overall health status
@@ -105,6 +136,7 @@ func NewHealthServer(port int, datastreamClient *schematicdatastreamws.Client, r
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", hs.healthHandler)
 	mux.HandleFunc("/ready", hs.readinessHandler)
+	mux.HandleFunc("/debug", hs.debugHandler)
 
 	hs.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -112,6 +144,72 @@ func NewHealthServer(port int, datastreamClient *schematicdatastreamws.Client, r
 	}
 
 	return hs
+}
+
+// SetDatastreamClient attaches the datastream client once it exists. The server
+// can be started before this (e.g. while waiting to acquire the writer lock):
+// until the client is set, /health reports alive and /ready reports not-ready.
+func (hs *HealthServer) SetDatastreamClient(client *schematicdatastreamws.Client) {
+	hs.mu.Lock()
+	hs.datastreamClient = client
+	hs.mu.Unlock()
+}
+
+// SetReplayDebug wires the replay introspection sources exposed at /debug. Any
+// may be nil (e.g. the cursor when replay is disabled).
+func (hs *HealthServer) SetReplayDebug(cursor *ReplayCursor, stats *ReplayStats, handler *AsyncReplicatorMessageHandler) {
+	hs.mu.Lock()
+	hs.replayCursor = cursor
+	hs.replayStats = stats
+	hs.msgHandler = handler
+	hs.mu.Unlock()
+}
+
+// debugReplay / debugMessages / debugResponse are the JSON shape of the /debug
+// endpoint.
+type debugReplay struct {
+	Enabled bool   `json:"enabled"`
+	Cursor  string `json:"cursor"`
+	ReplayStatsSnapshot
+}
+
+type debugMessages struct {
+	Processed int64 `json:"processed"`
+	Applied   int64 `json:"applied"`
+	Dropped   int64 `json:"dropped"`
+}
+
+type debugResponse struct {
+	Replay    debugReplay   `json:"replay"`
+	Messages  debugMessages `json:"messages"`
+	Timestamp time.Time     `json:"timestamp"`
+}
+
+// debugHandler exposes replay/processing introspection for operators and
+// integration tests: the committed cursor, reconnect/replay/reload counters, and
+// message-processing totals.
+func (hs *HealthServer) debugHandler(w http.ResponseWriter, r *http.Request) {
+	hs.mu.RLock()
+	cursor, stats, handler := hs.replayCursor, hs.replayStats, hs.msgHandler
+	hs.mu.RUnlock()
+
+	resp := debugResponse{
+		Replay:    debugReplay{Enabled: cursor != nil, ReplayStatsSnapshot: stats.Snapshot()},
+		Timestamp: time.Now(),
+	}
+	if cursor != nil {
+		resp.Replay.Cursor = cursor.Get()
+	}
+	if handler != nil {
+		p, a, d := handler.GetMetrics()
+		resp.Messages = debugMessages{Processed: p, Applied: a, Dropped: d}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		hs.logger.Error(context.Background(), fmt.Sprintf("Failed to encode debug status: %v", err))
+	}
 }
 
 // Start starts the health server
@@ -339,11 +437,44 @@ func main() {
 	var featuresCache CacheProvider[*rulesengine.Flag]
 
 	// Create Redis client - if this fails, the application will exit
-	redisClient := setupRedisClient()
+	redisClient := setupRedisClient(redisConfigFromEnv())
 
 	// Test Redis connection
 	if err := testRedisConnection(redisClient, logger); err != nil {
 		log.Fatalf("Redis connection failed: %v", err)
+	}
+
+	// Start the health server before acquiring the writer lock so probes get a
+	// response during a contended startup wait (rolling deploy / lease expiry):
+	// /health reports alive and /ready reports not-ready until setup completes.
+	// The datastream client is attached later via SetDatastreamClient.
+	healthServer := NewHealthServer(healthPort, nil, redisClient, logger)
+	healthServer.Start()
+
+	// Enforce the single-writer contract: only one instance may consume the
+	// datastream and write this Redis. Wait briefly for a previous writer to
+	// release (rolling deploy / lease expiry) before giving up. Disable with
+	// WRITER_LOCK_DISABLED=true (e.g. for future read-only instances).
+	var writerLock *WriterLock
+	var lockLost chan struct{}
+	var lockCancel context.CancelFunc
+	if os.Getenv("WRITER_LOCK_DISABLED") != "true" {
+		writerLockTTL := defaultWriterLockTTL
+		if v := os.Getenv("WRITER_LOCK_TTL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				writerLockTTL = d
+			}
+		}
+		writerLock = NewWriterLock(redisClient, logger, os.Getenv("WRITER_LOCK_KEY"), writerLockTTL)
+		if err := writerLock.Acquire(context.Background(), 2*writerLock.ttl); err != nil {
+			log.Fatalf("Could not acquire writer lock (another replicator instance may be running against this Redis): %v", err)
+		}
+		lockLost = make(chan struct{})
+		var lockLostOnce sync.Once
+		var lockCtx context.Context
+		lockCtx, lockCancel = context.WithCancel(context.Background())
+		defer lockCancel()
+		go writerLock.KeepAlive(lockCtx, func() { lockLostOnce.Do(func() { close(lockLost) }) })
 	}
 
 	logger.Info(context.Background(), "Using Redis cache with batch support")
@@ -453,11 +584,15 @@ func main() {
 		asyncConfig.CompanyChannelSize, asyncConfig.UserChannelSize, asyncConfig.FlagsChannelSize,
 		asyncConfig.CircuitBreakerThreshold, asyncConfig.CircuitBreakerTimeout))
 
-	// Parse async loading configuration
-	useAsyncLoading := false
+	// Parse async loading configuration. Async is the default: it loads once and
+	// resumes via replay on reconnect, avoiding the full-reload-on-every-reconnect
+	// behavior of the sync path (and replay is only wired on the async path). Opt
+	// into the legacy synchronous path with USE_ASYNC_LOADING=false (intended for
+	// small datasets / local development).
+	useAsyncLoading := true
 	if asyncLoadingStr := os.Getenv("USE_ASYNC_LOADING"); asyncLoadingStr != "" {
-		if asyncLoadingStr == "true" || asyncLoadingStr == "1" {
-			useAsyncLoading = true
+		if asyncLoadingStr == "false" || asyncLoadingStr == "0" {
+			useAsyncLoading = false
 		}
 	}
 
@@ -498,6 +633,24 @@ func main() {
 	// Create async message handler with caching and batching
 	messageHandler := NewAsyncReplicatorMessageHandler(companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncConfig)
 
+	// Counters for replay/reconnect behavior, exposed at /debug.
+	replayStats := &ReplayStats{}
+
+	// Replay cursor: lets a reconnect resume from the last processed message
+	// instead of a full reload. Disable with REPLAY_DISABLED=true to revert to
+	// full-reload-on-reconnect behavior — a rollout safety switch, and the
+	// fallback when the datastream server doesn't support replay. When the
+	// cursor is nil, the handler skips Track/Complete and never sets ReplayFrom,
+	// so the server behaves exactly as it did before replay existed.
+	var replayCursor *ReplayCursor
+	if os.Getenv("REPLAY_DISABLED") == "true" {
+		logger.Info(context.Background(), "Replay disabled (REPLAY_DISABLED=true); reconnects will do a full reload")
+	} else {
+		replayCursor = NewReplayCursor(redisClient, logger, os.Getenv("REPLAY_CURSOR_KEY"))
+		replayCursor.Load(context.Background())
+		messageHandler.SetReplayCursor(replayCursor)
+	}
+
 	// Create connection ready handler (wsClient will be set later)
 	var connectionReadyHandlerFunc schematicdatastreamws.ConnectionReadyHandlerFunc
 	var syncHandler *ConnectionReadyHandler
@@ -508,9 +661,20 @@ func main() {
 			asyncLoaderConfig.PageSize, asyncLoaderConfig.CircuitBreakerThreshold, asyncLoaderConfig.CircuitBreakerTimeout,
 			asyncLoaderConfig.MaxConcurrentRequests, asyncLoaderConfig.RateLimitRPS))
 		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncLoaderConfig)
+		asyncHandler.SetStats(replayStats)
+		if replayCursor != nil {
+			asyncHandler.SetReplayCursor(replayCursor)
+			messageHandler.SetReloadFunc(asyncHandler.TriggerReload)
+			// If the cursor's in-flight set overflows (a gap that narrow replay can
+			// no longer close), fall back to a full reload.
+			replayCursor.SetOverflowHandler(func() {
+				replayStats.IncOverflowEscalations()
+				asyncHandler.TriggerReload(context.Background())
+			})
+		}
 		connectionReadyHandlerFunc = asyncHandler.OnConnectionReady
 	} else {
-		logger.Info(context.Background(), "Using synchronous initial loading (default)")
+		logger.Info(context.Background(), "Using synchronous initial loading (USE_ASYNC_LOADING=false); replay is disabled on this path")
 		syncHandler = NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL)
 		connectionReadyHandlerFunc = syncHandler.OnConnectionReady
 	}
@@ -532,12 +696,21 @@ func main() {
 		syncHandler.SetWebSocketClient(datastreamClient)
 	}
 
-	// Create and start health server
-	healthServer := NewHealthServer(healthPort, datastreamClient, redisClient, logger)
-	healthServer.Start()
+	// Attach the datastream client to the already-running health server so
+	// readiness now reflects datastream connectivity and initial load, and wire
+	// the replay introspection exposed at /debug.
+	healthServer.SetDatastreamClient(datastreamClient)
+	healthServer.SetReplayDebug(replayCursor, replayStats, messageHandler)
 
 	// Start the WebSocket connection
 	datastreamClient.Start()
+
+	// Periodically persist the replay cursor so a process restart can resume.
+	cursorCtx, cursorCancel := context.WithCancel(context.Background())
+	defer cursorCancel()
+	if replayCursor != nil {
+		replayCursor.StartFlusher(cursorCtx, 5*time.Second)
+	}
 
 	// Start cache cleanup manager if enabled
 	if cacheCleanupManager != nil {
@@ -574,9 +747,9 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
-				processed, dropped := messageHandler.GetMetrics()
+				processed, applied, dropped := messageHandler.GetMetrics()
 				if processed > 0 || dropped > 0 {
-					logger.Info(context.Background(), fmt.Sprintf("Message metrics: processed=%d, dropped=%d", processed, dropped))
+					logger.Info(context.Background(), fmt.Sprintf("Message metrics: processed=%d, applied=%d, dropped=%d", processed, applied, dropped))
 				}
 			case <-sigChan:
 				return
@@ -584,9 +757,19 @@ func main() {
 		}
 	}()
 
-	// Wait for shutdown signal
-	<-sigChan
-	logger.Info(context.Background(), "Received shutdown signal, closing connection...")
+	// Wait for a shutdown signal, or for the writer lock to be lost (another
+	// instance took over) — in which case we must stop to preserve the
+	// single-writer guarantee.
+	select {
+	case <-sigChan:
+		logger.Info(context.Background(), "Received shutdown signal, closing connection...")
+	case <-lockLost:
+		logger.Error(context.Background(), "Lost writer lock; shutting down to preserve the single-writer guarantee")
+	}
+
+	// Stop the cursor flusher (flushes once more) so the latest position is
+	// durable across the restart.
+	cursorCancel()
 
 	// Stop cache cleanup manager
 	if cacheCleanupManager != nil {
@@ -609,6 +792,14 @@ func main() {
 
 	// Close the WebSocket connection
 	datastreamClient.Close()
+
+	// Release the writer lock last, after we've stopped consuming and writing,
+	// so a replacement instance doesn't start writing while we're still flushing.
+	// Stop the renewer first so it can't re-extend the lease after we release.
+	if writerLock != nil {
+		lockCancel()
+		writerLock.Release(context.Background())
+	}
 
 	logger.Info(context.Background(), "Datastream replicator stopped")
 }

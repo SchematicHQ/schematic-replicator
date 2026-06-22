@@ -4,88 +4,76 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
 )
 
-func setupRedisClient() redis.Cmdable {
-	// Check if we're using cluster mode
-	clusterMode := os.Getenv("REDIS_CLUSTER_MODE")
-	if strings.ToLower(clusterMode) == "true" {
-		return setupRedisCluster()
-	}
-	return setupRedisSingle()
+// RedisConfig holds the Redis connection settings. main populates it from the
+// environment; nothing else in the package reads the env.
+type RedisConfig struct {
+	ClusterMode              bool
+	Addr                     string   // single-node address ("" → localhost:6379)
+	ClusterAddrs             []string // cluster addresses (empty → localhost:7000-7002)
+	Password                 string
+	DB                       int
+	TLS                      bool
+	MaintenanceNotifications bool // Redis Cloud/Enterprise feature; disabled unless true
 }
 
-func setupRedisSingle() *redis.Client {
-	addr := os.Getenv("REDIS_ADDR")
+func setupRedisClient(cfg RedisConfig) redis.Cmdable {
+	if cfg.ClusterMode {
+		return setupRedisCluster(cfg)
+	}
+	return setupRedisSingle(cfg)
+}
+
+func setupRedisSingle(cfg RedisConfig) *redis.Client {
+	addr := cfg.Addr
 	if addr == "" {
 		addr = "localhost:6379"
 	}
 
-	password := os.Getenv("REDIS_PASSWORD")
-
-	dbStr := os.Getenv("REDIS_DB")
-	db := 0
-	if dbStr != "" {
-		if parsed, err := strconv.Atoi(dbStr); err == nil {
-			db = parsed
-		}
-	}
-
 	opts := &redis.Options{
 		Addr:     addr,
-		Password: password,
-		DB:       db,
+		Password: cfg.Password,
+		DB:       cfg.DB,
 	}
 
 	// Disable maintenance mode notifications by default (Redis Cloud/Enterprise feature)
-	if os.Getenv("REDIS_ENABLE_MAINTENANCE_NOTIFICATIONS") != "true" {
+	if !cfg.MaintenanceNotifications {
 		opts.MaintNotificationsConfig = &maintnotifications.Config{
 			Mode: maintnotifications.ModeDisabled,
 		}
 	}
 
-	// Optional TLS configuration
-	if os.Getenv("REDIS_TLS") == "true" {
+	if cfg.TLS {
 		opts.TLSConfig = &tls.Config{}
 	}
 
 	return redis.NewClient(opts)
 }
 
-func setupRedisCluster() *redis.ClusterClient {
-	addrsStr := os.Getenv("REDIS_CLUSTER_ADDRS")
-	if addrsStr == "" {
-		addrsStr = "localhost:7000,localhost:7001,localhost:7002"
+func setupRedisCluster(cfg RedisConfig) *redis.ClusterClient {
+	addrs := cfg.ClusterAddrs
+	if len(addrs) == 0 {
+		addrs = []string{"localhost:7000", "localhost:7001", "localhost:7002"}
 	}
-
-	addrs := strings.Split(addrsStr, ",")
-	for i, addr := range addrs {
-		addrs[i] = strings.TrimSpace(addr)
-	}
-
-	password := os.Getenv("REDIS_PASSWORD")
 
 	opts := &redis.ClusterOptions{
 		Addrs:    addrs,
-		Password: password,
+		Password: cfg.Password,
 	}
 
 	// Disable maintenance mode notifications by default (Redis Cloud/Enterprise feature)
-	if os.Getenv("REDIS_ENABLE_MAINTENANCE_NOTIFICATIONS") != "true" {
+	if !cfg.MaintenanceNotifications {
 		opts.MaintNotificationsConfig = &maintnotifications.Config{
 			Mode: maintnotifications.ModeDisabled,
 		}
 	}
 
-	// Optional TLS configuration
-	if os.Getenv("REDIS_TLS") == "true" {
+	if cfg.TLS {
 		opts.TLSConfig = &tls.Config{}
 	}
 

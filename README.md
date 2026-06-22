@@ -77,27 +77,35 @@ These settings allow you to optimize performance for your specific infrastructur
 - **Memory Constrained**: Reduce channel sizes (50-100 each)
 - **High CPU**: Increase worker count up to 2x CPU cores
 
-### Async Initial Loading Configuration (New!)
-For faster connection setup and improved resilience with large datasets (>1000 companies/users):
+### Initial Loading Mode
 
-- `USE_ASYNC_LOADING`: Enable asynchronous initial data loading (`true`/`false`, default: `false`)
+The replicator defaults to **asynchronous** initial loading. The async path loads
+companies/users once at startup (in the background, so the WebSocket connects
+quickly) and then resumes from the last processed message via **replay** on
+reconnect. The legacy **synchronous** path blocks on a full load at startup and
+does a **full reload on every reconnect**, and does not participate in replay.
+
+- `USE_ASYNC_LOADING`: initial loading mode (`true`/`false`, default: `true`).
+  Set to `false` to use the legacy synchronous path.
 - `ASYNC_LOADER_PAGE_SIZE`: Page size for initial data loading (default: `100`)
 - `ASYNC_LOADER_CIRCUIT_BREAKER_THRESHOLD`: API call failures before circuit breaker opens (default: `5`)
 - `ASYNC_LOADER_CIRCUIT_BREAKER_TIMEOUT`: Circuit breaker recovery timeout (default: `30s`)
 
-**When to use Async Loading**:
-- ✅ **Large datasets** (2000+ companies/users): Reduces connection time from ~60s to ~2s
-- ✅ **Production environments**: WebSocket connects quickly, data loads in background
-- ✅ **High availability**: Circuit breaker protects against API overload
-- ❌ **Small datasets** (<500 companies/users): Synchronous loading is sufficient
-- ❌ **Development**: Synchronous loading provides simpler debugging
+**When to use each mode**:
+- ✅ **Async (default)** — production, and any non-trivial dataset: fast connect,
+  background load, and replay-on-reconnect (avoids the bulk-reload storm when the
+  datastream connection drops). Replay only works on this path.
+- ⚠️ **Sync (`USE_ASYNC_LOADING=false`)** — small datasets / local development
+  where blocking load is simpler to reason about. Note it does a full reload on
+  every reconnect and has no replay.
 
-Example for production with large datasets:
+Async loader tuning (production with large datasets):
 ```bash
-export USE_ASYNC_LOADING="true"
 export ASYNC_LOADER_PAGE_SIZE="100"
 export ASYNC_LOADER_CIRCUIT_BREAKER_THRESHOLD="5"
 export ASYNC_LOADER_CIRCUIT_BREAKER_TIMEOUT="30s"
+# Opt into the legacy synchronous path instead (no replay):
+# export USE_ASYNC_LOADING="false"
 ```
 
 ### Redis Configuration (Required)
