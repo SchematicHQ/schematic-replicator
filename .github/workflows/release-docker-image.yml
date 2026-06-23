@@ -14,7 +14,9 @@ env:
   ECR_IMAGE: schematic-replicator
 
 jobs:
-  # Build Docker image once and prepare for multi-registry push
+  # Compile the image once and warm the GHA layer cache for the push jobs.
+  # build-args MUST match the push jobs, or the `go build` layer cache-misses
+  # and the pushed binary recompiles with the Dockerfile default version (dev).
   build:
     runs-on: runs-on=${{ github.run_id }}/runner=4cpu-linux-arm64
     permissions:
@@ -27,7 +29,7 @@ jobs:
       tags: ${{ steps.meta.outputs.tags }}
       dockerhub-image: ${{ steps.set-images.outputs.dockerhub-image }}
       ecr-image: ${{ steps.set-images.outputs.ecr-image }}
-    
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
@@ -89,7 +91,7 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
@@ -116,7 +118,8 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest
 
-      # Push to Docker Hub using cached build
+      # Push to Docker Hub using cached build. build-args must match the `build`
+      # job so the binary is reused from cache with its version ldflags intact.
       - name: Push to Docker Hub
         uses: docker/build-push-action@v7
         with:
@@ -130,6 +133,10 @@ jobs:
           # Enable built-in attestations (provenance and SBOM)
           provenance: mode=max
           sbom: true
+          build-args: |
+            BUILDTIME=${{ fromJSON(steps.meta-dockerhub.outputs.json).labels['org.opencontainers.image.created'] }}
+            VERSION=${{ fromJSON(steps.meta-dockerhub.outputs.json).labels['org.opencontainers.image.version'] }}
+            REVISION=${{ fromJSON(steps.meta-dockerhub.outputs.json).labels['org.opencontainers.image.revision'] }}
 
   # Push to AWS ECR Public
   push-ecr:
@@ -139,7 +146,7 @@ jobs:
       contents: read
       id-token: write # Required for OIDC
       attestations: write
-    
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
@@ -171,12 +178,13 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest
 
-      # Push to ECR using cached build
+      # Push to ECR using cached build. build-args must match the `build` job so
+      # the binary is reused from cache with its version ldflags intact.
       - name: Push to Amazon ECR Public
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: deployments/Dockerfile  # Fixed: Correct path to Dockerfile
+          file: deployments/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta-ecr.outputs.tags }}
@@ -185,6 +193,10 @@ jobs:
           # Enable built-in attestations (provenance and SBOM)
           provenance: mode=max
           sbom: true
+          build-args: |
+            BUILDTIME=${{ fromJSON(steps.meta-ecr.outputs.json).labels['org.opencontainers.image.created'] }}
+            VERSION=${{ fromJSON(steps.meta-ecr.outputs.json).labels['org.opencontainers.image.version'] }}
+            REVISION=${{ fromJSON(steps.meta-ecr.outputs.json).labels['org.opencontainers.image.revision'] }}
 
   # Security scan after successful pushes
   security-scan:
@@ -193,7 +205,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    
+
     strategy:
       matrix:
         registry:
@@ -201,7 +213,7 @@ jobs:
             image: "${{ needs.build.outputs.dockerhub-image }}"
           - name: "ECR Public"
             image: "${{ needs.build.outputs.ecr-image }}"
-    
+
     steps:
       # Security: Scan the built images in both registries
       - name: Run Trivy vulnerability scanner on ${{ matrix.registry.name }}
@@ -210,4 +222,3 @@ jobs:
           image-ref: ${{ matrix.registry.image }}
           format: 'table'
           # Output will be shown in the GitHub Actions log
-
