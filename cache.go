@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -360,7 +361,7 @@ func (c *CacheCleanupManager) cleanupStaleEntries(ctx context.Context) error {
 
 	for _, p := range patterns {
 		// Clean up stale entries for this cache type
-		deletedCount, err := c.deleteStaleKeysForCache(ctx, p.pattern, currentVersion)
+		deletedCount, byVersion, err := c.deleteStaleKeysForCache(ctx, p.pattern, currentVersion)
 
 		if err != nil {
 			c.logger.Error(ctx, fmt.Sprintf("Failed to cleanup %s cache: %v", p.name, err))
@@ -368,7 +369,10 @@ func (c *CacheCleanupManager) cleanupStaleEntries(ctx context.Context) error {
 		}
 
 		if deletedCount > 0 {
-			c.logger.Info(ctx, fmt.Sprintf("Cleaned up %d stale %s cache entries", deletedCount, p.name))
+			// Include the per-version breakdown so the logs alone reveal which
+			// version namespace is being evicted (and, if it persists run after
+			// run, which other writer is repopulating it) — no Redis access needed.
+			c.logger.Info(ctx, fmt.Sprintf("Cleaned up %d stale %s cache entries (current=%s, deleted by version: %v)", deletedCount, p.name, currentVersion, byVersion))
 			totalDeleted += deletedCount
 		}
 	}
@@ -387,7 +391,7 @@ func (c *CacheCleanupManager) deleteStaleKeysForCache(
 	ctx context.Context,
 	pattern string,
 	currentVersion string,
-) (int, error) {
+) (int, map[string]int, error) {
 	// Get Redis client from any of the caches (they should all be Redis)
 	var client redis.Cmdable
 
@@ -396,55 +400,89 @@ func (c *CacheCleanupManager) deleteStaleKeysForCache(
 		client = redisCache.client
 	} else {
 		c.logger.Warn(ctx, "Cache cleanup not supported for non-Redis cache implementations")
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	return c.deleteStaleKeysFromRedis(ctx, client, pattern, currentVersion)
 }
 
-// deleteStaleKeysFromRedis scans Redis for keys and deletes those with old versions
+// deleteStaleKeysFromRedis scans Redis for keys and deletes those with old versions.
+//
+// SCAN is a keyless command, so on a Redis Cluster client it is routed to a
+// single node and its cursor is only valid for that node. Iterating one cursor
+// loop therefore covers just one shard, leaving stale keys on every other shard
+// untouched. To scan the whole keyspace we must fan out over every master via
+// ForEachMaster; a single-node client is scanned directly.
 func (c *CacheCleanupManager) deleteStaleKeysFromRedis(
 	ctx context.Context,
 	client redis.Cmdable,
 	pattern string,
 	currentVersion string,
-) (int, error) {
-	var cursor uint64
-	var staleKeys []string
+) (int, map[string]int, error) {
+	var (
+		mu        sync.Mutex
+		staleKeys []string
+		// byVersion counts deleted keys per stale version segment, so the caller
+		// can log which version namespace(s) are being evicted. A non-current
+		// version that keeps reappearing points at another writer (e.g. a
+		// direct-mode schematic-go client) on a different rulesengine version.
+		byVersion = map[string]int{}
+	)
 
-	for {
-		keys, nextCursor, err := client.Scan(ctx, cursor, pattern, 100).Result()
-		if err != nil {
-			return 0, fmt.Errorf("failed to scan keys: %w", err)
-		}
+	// scanNode walks one node's keyspace and records the stale keys it finds.
+	scanNode := func(ctx context.Context, node redis.Cmdable) error {
+		var cursor uint64
+		for {
+			keys, nextCursor, err := node.Scan(ctx, cursor, pattern, 100).Result()
+			if err != nil {
+				return fmt.Errorf("failed to scan keys: %w", err)
+			}
 
-		// Filter keys to find stale ones (not matching current version)
-		for _, key := range keys {
-			parts := strings.Split(key, ":")
-			if len(parts) >= 4 {
-				keyVersion := parts[2] // Version is the 3rd part: schematic:type:version:...
-				if keyVersion != currentVersion {
-					staleKeys = append(staleKeys, key)
+			// Filter keys to find stale ones (not matching current version)
+			mu.Lock()
+			for _, key := range keys {
+				parts := strings.Split(key, ":")
+				if len(parts) >= 4 {
+					keyVersion := parts[2] // Version is the 3rd part: schematic:type:version:...
+					if keyVersion != currentVersion {
+						staleKeys = append(staleKeys, key)
+						byVersion[keyVersion]++
+					}
 				}
 			}
-		}
+			mu.Unlock()
 
-		cursor = nextCursor
-		if cursor == 0 {
-			break
+			cursor = nextCursor
+			if cursor == 0 {
+				break
+			}
 		}
+		return nil
 	}
 
-	// Delete stale keys individually via pipeline to avoid CROSSSLOT errors in Redis Cluster
+	// ForEachMaster runs the callbacks concurrently across shards (scanNode
+	// guards staleKeys with mu); a non-cluster client scans inline.
+	if cluster, ok := client.(*redis.ClusterClient); ok {
+		if err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error {
+			return scanNode(ctx, node)
+		}); err != nil {
+			return 0, nil, fmt.Errorf("cluster scan failed: %w", err)
+		}
+	} else if err := scanNode(ctx, client); err != nil {
+		return 0, nil, err
+	}
+
+	// Delete stale keys individually via pipeline to avoid CROSSSLOT errors in
+	// Redis Cluster (the cluster pipeline routes each Del to its owning node).
 	if len(staleKeys) > 0 {
 		pipe := client.Pipeline()
 		for _, key := range staleKeys {
 			pipe.Del(ctx, key)
 		}
 		if _, err := pipe.Exec(ctx); err != nil {
-			return 0, fmt.Errorf("failed to delete stale keys: %w", err)
+			return 0, nil, fmt.Errorf("failed to delete stale keys: %w", err)
 		}
 	}
 
-	return len(staleKeys), nil
+	return len(staleKeys), byVersion, nil
 }
