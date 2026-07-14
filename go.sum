@@ -22,8 +22,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/redis/go-redis/v9 v9.21.0 h1:FPBE4hhbAke+TLmcY3WkpbDffJEomdqPn3HYiqAtL9E=
 github.com/redis/go-redis/v9 v9.21.0/go.mod h1:v/M13XI1PVCDcm01VtPFOADfZtHf8YW3baQf57KlIkA=
-github.com/schematichq/rulesengine v0.1.19 h1:CPogfr3HOWHlHF7ZBFqvMVMO3xDtuOELV14plocI6lA=
-github.com/schematichq/rulesengine v0.1.19/go.mod h1:HmweBgjg+kVe6VuNMLc7FISHFF0wzr5cVGLAxlVP8+4=
+github.com/schematichq/rulesengine v0.1.20 h1:yNi9ipHn0b+/7S1C5AFxexNB8UlV4WGTvlSsSUEggas=
+github.com/schematichq/rulesengine v0.1.20/go.mod h1:HmweBgjg+kVe6VuNMLc7FISHFF0wzr5cVGLAxlVP8+4=
 github.com/schematichq/schematic-datastream-ws v0.2.9 h1:tmXuFJklnrrKI2gb7i+eTRstvRYG6fKWnIlHfg4jq1A=
 github.com/schematichq/schematic-datastream-ws v0.2.9/go.mod h1:NKrg326C9YfCDOI84On5GZhvrovzDpFCzW8wdBwPZ3g=
 github.com/schematichq/schematic-go v1.5.0 h1:ffuKNTjzwJQxkmJUMSIw5/LMFPnUX8yBEWCdtegQOGs=
