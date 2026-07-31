@@ -1,0 +1,37 @@
+{{/*
+Fail fast on configurations that would otherwise surface as a CrashLoopBackOff
+minutes later. This template renders nothing.
+*/}}
+
+{{- if and (not .Values.schematic.apiKey) (not .Values.schematic.existingSecret) -}}
+{{- fail "schematic.apiKey or schematic.existingSecret is required. The replicator exits at startup without SCHEMATIC_API_KEY." -}}
+{{- end -}}
+
+{{- if .Values.redis.cluster.enabled -}}
+  {{- if not .Values.redis.cluster.addrs -}}
+  {{- fail "redis.cluster.addrs is required when redis.cluster.enabled is true." -}}
+  {{- end -}}
+  {{- /* Each entry is split on "," and passed to go-redis ClusterOptions.Addrs,
+         which expects host:port exactly as the single-instance Addr does. */ -}}
+  {{- range $addr := splitList "," .Values.redis.cluster.addrs -}}
+    {{- $trimmed := trim $addr -}}
+    {{- if or (hasPrefix "redis://" $trimmed) (hasPrefix "rediss://" $trimmed) -}}
+    {{- fail (printf "redis.cluster.addrs entries must be host:port, not URLs (got %q). Values are passed straight to the go-redis ClusterOptions.Addrs field and a URL scheme fails to dial." $trimmed) -}}
+    {{- end -}}
+  {{- end -}}
+{{- else -}}
+  {{- if not .Values.redis.addr -}}
+  {{- fail "redis.addr is required. Redis is mandatory: the replicator exits if it cannot connect." -}}
+  {{- end -}}
+  {{- if or (hasPrefix "redis://" .Values.redis.addr) (hasPrefix "rediss://" .Values.redis.addr) -}}
+  {{- fail (printf "redis.addr must be host:port, not a URL (got %q). The value is passed straight to the go-redis Addr field and a URL scheme fails to dial." .Values.redis.addr) -}}
+  {{- end -}}
+{{- end -}}
+
+{{- if and .Values.schematic.existingSecret (not .Values.schematic.existingSecretKey) -}}
+{{- fail "schematic.existingSecretKey is required when schematic.existingSecret is set." -}}
+{{- end -}}
+
+{{- if and .Values.redis.existingSecret (not .Values.redis.existingSecretKey) -}}
+{{- fail "redis.existingSecretKey is required when redis.existingSecret is set." -}}
+{{- end -}}

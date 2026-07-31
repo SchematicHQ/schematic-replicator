@@ -1,0 +1,5 @@
+# Minimum viable install: inline key, single Redis.
+schematic:
+  apiKey: ci-test-key
+redis:
+  addr: redis:6379

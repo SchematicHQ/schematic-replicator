@@ -1,0 +1,24 @@
+apiVersion: v2
+name: schematic-replicator
+description: Replicates Schematic data into Redis for fast local flag evaluation
+type: application
+
+# version    - the chart's own version, bumped on chart changes.
+# appVersion - the replicator release this chart defaults to, and the default
+#              image tag. Keep in step with the image tags published by
+#              .github/workflows/release-docker-image.yml.
+version: 0.1.0
+appVersion: "0.2.5"
+
+home: https://github.com/SchematicHQ/schematic-datastream-replicator
+sources:
+  - https://github.com/SchematicHQ/schematic-datastream-replicator
+maintainers:
+  - name: Schematic
+    url: https://schematichq.com
+
+keywords:
+  - schematic
+  - feature-flags
+  - redis
+  - replicator
