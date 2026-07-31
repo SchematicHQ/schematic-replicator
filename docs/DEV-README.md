@@ -2,148 +2,176 @@
 
 Quick reference for local development with the Schematic Datastream Replicator.
 
-## 🚀 Quick Start
+Task automation lives in [`Taskfile.yml`](../Taskfile.yml) and runs via
+[Task](https://taskfile.dev) (`brew install go-task`). Run `task` with no
+arguments to list every available target.
+
+## Quick Start
 
 ```bash
 # 1. Set up local development (one-time)
-make dev-setup
+task dev-setup
 
-# 2. Quick build and start
-make quick
+# 2. Build, test, and start the stack
+task quick
 
 # 3. View logs
-make dev-logs
+task dev-logs
 
 # 4. Check health
-make health-check
+task health-check
 ```
 
-## 📋 Prerequisites
+## Prerequisites
 
 - Docker & Docker Compose
-- Go 1.21+
+- Go 1.26+ (see `go.mod`)
+- [Task](https://taskfile.dev)
 - `SCHEMATIC_API_KEY` environment variable
 
-## 🔨 Build Scripts
+## Common Tasks
 
-### Primary Scripts
-- **`make quick`** - Most common: build → test → Docker → start
-- **`./dev-build.sh`** - Full development workflow with options
-- **`./build-docker.sh`** - Production Docker build with security
-- **`./setup-local-dev.sh`** - Interactive local API setup
+| Task | What it does |
+|------|--------------|
+| `task` | List all available tasks |
+| `task build` | Build the Go binary locally |
+| `task test` | Run Go tests |
+| `task run` | Run the application directly (`go run .`) |
+| `task lint` | Run golangci-lint, or fall back to `go vet` + `go fmt` |
+| `task security-scan` | Run gosec, if installed |
+| `task clean` | Remove build artifacts |
 
-### Script Options
+### Development stack
+
+| Task | What it does |
+|------|--------------|
+| `task dev-setup` | One-time local setup (interactive) |
+| `task dev-build` | Build and restart the stack, detached |
+| `task dev-rebuild` | Force rebuild without cache, then restart |
+| `task dev-logs` | Follow container logs |
+| `task dev-exec` | Open a shell in the replicator container |
+| `task dev-down` | Stop the stack |
+| `task dev-clean` | Remove containers, images, and volumes |
+| `task quick` | `build` + `test` + `dev-build` |
+| `task fresh` | `dev-down` + `dev-clean` + `dev-build` |
+
+### Docker Compose
+
+All compose commands target `deployments/docker-compose.yml`.
+
+| Task | What it does |
+|------|--------------|
+| `task docker-up` / `docker-down` | Start / stop services |
+| `task docker-logs` | Follow logs |
+| `task docker-restart` | Restart services |
+| `task docker-clean` | Tear down including volumes and images |
+| `task docker-check` | Verify Docker Compose version compatibility |
+| `task build-docker` | Build the production image with security checks |
+
+### Health
+
+| Task | What it does |
+|------|--------------|
+| `task health-check` | `curl` the `/health` endpoint |
+| `task ready-check` | `curl` the `/ready` endpoint |
+
+## Scripts
+
+Task targets wrap the scripts in [`scripts/`](../scripts). Call them directly
+when you need options Task doesn't expose:
+
 ```bash
-# Development build with options
-./dev-build.sh --help              # Show all options
-./dev-build.sh --detached          # Run in background
-./dev-build.sh --force-rebuild     # Force rebuild without cache
-./dev-build.sh --skip-tests        # Skip Go tests
+./scripts/dev-build.sh --help              # Show all options
+./scripts/dev-build.sh --detached          # Run in background
+./scripts/dev-build.sh --force-rebuild     # Force rebuild without cache
+./scripts/dev-build.sh --skip-tests        # Skip Go tests
+./scripts/dev-build.sh --skip-build        # Docker only, skip the Go build
 
-# Production build with options
-./build-docker.sh                  # Default: build with local deps
-./build-docker.sh standalone       # Build without local deps
-./build-docker.sh scan             # Security scan only
+./scripts/build-docker.sh                  # Build the image (default)
+./scripts/build-docker.sh scan             # Security scan an existing image
+./scripts/build-docker.sh test             # Test an existing image
+./scripts/build-docker.sh clean            # Remove intermediate images
 ```
 
-## 🏠 Local API Connection
+## Local API Connection
 
-### Automatic Setup
+### Automatic setup
+
 ```bash
-./setup-local-dev.sh
-# → Creates docker-compose.override.yml
+task dev-setup
+# → Creates deployments/docker-compose.override.yml
 # → Prompts for your local API URL
-# → Ready to use with docker compose up
 ```
 
-### Manual Setup
-```bash
-# Copy override template
-cp docker-compose.override.yml.example docker-compose.override.yml
+### Manual setup
 
-# Edit API URL to match your local service
+```bash
+cp deployments/docker-compose.override.yml.example \
+   deployments/docker-compose.override.yml
+
+# Edit the API URL to match your local service.
 # Default: http://host.docker.internal:8080
 ```
 
-### Common Local URLs
+The `task` targets and `scripts/dev-build.sh` add this file automatically when it
+exists, so `task docker-up` and friends pick it up with no extra flags.
+
+Running Compose by hand is the one case that needs care: Compose only auto-loads
+`docker-compose.override.yml` during default file discovery, and passing `-f`
+bypasses that. List it explicitly:
+
+```bash
+docker compose \
+  -f deployments/docker-compose.yml \
+  -f deployments/docker-compose.override.yml \
+  up
+
+# Or let Compose discover both files:
+docker compose --project-directory deployments up
+```
+
+Common local URLs:
+
 - `http://host.docker.internal:8080` (default)
 - `http://host.docker.internal:3000` (Node.js)
-- `http://host.docker.internal:5000` (Python/Flask)
 - `http://192.168.1.100:8080` (specific IP)
 
-## 🔍 Development Workflow
-
-### Standard Workflow
-```bash
-# Start development
-make dev-setup     # One-time setup
-make quick         # Build and start
-
-# During development
-make dev-logs      # View logs
-make health-check  # Test endpoints
-make dev-rebuild   # Rebuild after changes
-
-# Clean up
-make dev-down      # Stop containers
-make dev-clean     # Full cleanup
-```
-
-### Testing Changes
-```bash
-# Quick iteration
-./dev-build.sh --skip-tests --detached
-
-# Full validation
-make dev-rebuild
-
-# Fresh start
-make fresh
-```
-
-## 📊 Monitoring
+## Monitoring
 
 ```bash
-# Health checks
+# Health endpoints
 curl http://localhost:8090/health
 curl http://localhost:8090/ready
 
 # Container stats
-docker compose ps
-docker stats $(docker compose ps -q)
+docker compose -f deployments/docker-compose.yml ps
+docker stats $(docker compose -f deployments/docker-compose.yml ps -q)
 
 # Logs
-docker compose logs -f schematic-replicator
-docker compose logs -f redis
+docker compose -f deployments/docker-compose.yml logs -f schematic-replicator
+docker compose -f deployments/docker-compose.yml logs -f redis
 ```
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
-### Common Issues
-1. **API connection fails**: Check `SCHEMATIC_API_URL` and local service
-2. **Redis connection fails**: Ensure Redis container is healthy
-3. **Build fails**: Run `make clean` and try again
-4. **Port conflicts**: Check if ports 8090/6380 are available
+1. **API connection fails** — check `SCHEMATIC_API_URL` and that your local service is up.
+2. **Redis connection fails** — ensure the Redis container is healthy. Redis is
+   mandatory; the app exits if it cannot connect. `REDIS_ADDR` takes bare
+   `host:port`, not a `redis://` URL.
+3. **"Could not acquire writer lock"** — another replicator instance is running
+   against the same Redis. Only one writer is allowed; see the
+   [single-writer constraint](../README.md#single-writer-constraint).
+4. **Build fails** — run `task clean` and retry.
+5. **Port conflicts** — check that 8090 (health) and 6380 (Redis) are free.
 
-### Debug Commands
-```bash
-# Check environment
-make env-check
+## Environment Variables
 
-# Container shell access
-make dev-shell
+See the [README](../README.md#environment-variables) for the full set. The ones
+that matter most in development:
 
-# View all make targets
-make help
-```
-
-## 📝 Environment Variables
-
-Required:
-- `SCHEMATIC_API_KEY` - Your API key
-
-Optional:
-- `SCHEMATIC_API_URL` - API URL (default: production)
-- `LOG_LEVEL` - debug, info, warn, error (default: info)
-- `CACHE_TTL` - Cache duration (default: 5m)
-- `HEALTH_PORT` - Health check port (default: 8090)
+- `SCHEMATIC_API_KEY` — required
+- `SCHEMATIC_API_URL` — API URL (default: `https://api.schematichq.com`)
+- `REDIS_ADDR` — Redis address as `host:port` (default: `localhost:6379`)
+- `LOG_LEVEL` — `debug`, `info`, `warn`, `error` (default: `info`)
+- `CACHE_TTL` — cache duration (default: unlimited)
+- `HEALTH_PORT` — health server port (default: `8090`)

@@ -17,7 +17,7 @@ docker run -d \
   --name schematic-replicator \
   -p 8090:8090 \
   -e SCHEMATIC_API_KEY="your-api-key-here" \
-  -e REDIS_ADDR="redis://your-redis-host:6379" \
+  -e REDIS_ADDR="your-redis-host:6379" \
   getschematic/schematic-replicator:latest
 
 # Check health status
@@ -130,6 +130,28 @@ export REDIS_PASSWORD=""                     # Cluster password (if required)
 export REDIS_MAX_REDIRECTS="8"              # Maximum cluster redirects
 export REDIS_ROUTE_BY_LATENCY="true"        # Route by lowest latency
 ```
+
+### Single-Writer Constraint
+
+Exactly **one** replicator instance may consume the datastream and write a given
+Redis. A second writer would corrupt the replay cursor and double-write the
+cache. This is enforced with a Redis lease: an instance acquires it at startup,
+heartbeats it while running, and releases it on shutdown. A crashed instance's
+lease expires by TTL so a replacement can take over.
+
+An instance that cannot acquire the lease **exits with an error**. Deploy
+accordingly: run a single replica, and on orchestrators use a replacement
+strategy that stops the old instance before starting the new one (Kubernetes
+`strategy: Recreate` — see [docs/DOCKER.md](docs/DOCKER.md#3-kubernetes)).
+
+- `WRITER_LOCK_DISABLED`: Skip lease acquisition (`true`/`false`, default: `false`).
+  Only for instances that never write the cache; setting this on a second writer
+  reintroduces the corruption it prevents.
+- `WRITER_LOCK_TTL`: Lease duration (default: `15s`). Renewed at TTL/3. Longer
+  values tolerate more heartbeat failures but delay takeover after a crash.
+- `WRITER_LOCK_KEY`: Redis key holding the lease (default:
+  `schematic:datastream:writer_lock`). Change only to run independent replicators
+  against separate keyspaces in one Redis.
 
 ## Usage
 
