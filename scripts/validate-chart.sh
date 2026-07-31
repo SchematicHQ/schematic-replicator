@@ -97,6 +97,60 @@ assert_rejects "empty redis.addr" \
 assert_rejects "existingSecret without key" \
     --set schematic.existingSecret=s --set schematic.existingSecretKey=""
 
+# The chart mirrors the application's environment surface. Nothing else couples
+# them, so a new os.Getenv in the code silently becomes unreachable via the
+# chart unless this check fails the build.
+echo "==> chart env surface matches the application"
+ENV_DRIFT=$(python3 - "$CHART" <<'PYEOF'
+import glob, os, re, sys
+
+chart = sys.argv[1]
+
+# Env vars the application reads. Handles both os.Getenv("LITERAL") and the
+# const-indirect form (apiKeyEnvVar = "SCHEMATIC_API_KEY"; os.Getenv(apiKeyEnvVar)).
+src = ""
+for path in glob.glob("*.go"):
+    if path.endswith("_test.go"):
+        continue
+    with open(path) as handle:
+        src += handle.read()
+
+code = set(re.findall(r'os\.Getenv\("([A-Z][A-Z0-9_]*)"\)', src))
+consts = dict(re.findall(r'(\w+)\s*=\s*"([A-Z][A-Z0-9_]*)"', src))
+for ident in re.findall(r'os\.Getenv\((\w+)\)', src):
+    if ident in consts:
+        code.add(consts[ident])
+
+# Env vars the chart can emit.
+tpl = ""
+for path in (
+    os.path.join(chart, "templates", "_helpers.tpl"),
+    os.path.join(chart, "templates", "deployment.yaml"),
+):
+    with open(path) as handle:
+        tpl += handle.read()
+
+emitted = set(re.findall(r'"name"\s+"([A-Z][A-Z0-9_]*)"', tpl))
+emitted |= set(re.findall(r'-\s+name:\s+([A-Z][A-Z0-9_]*)\b', tpl))
+
+# Vars deliberately left to extraEnv rather than modelled as a first-class value.
+allowed_missing: set[str] = set()
+
+missing = code - emitted - allowed_missing
+extra = emitted - code
+
+for name in sorted(missing):
+    print(f"read by app, not settable via chart: {name}")
+for name in sorted(extra):
+    print(f"emitted by chart, not read by app: {name}")
+PYEOF
+)
+if [ -z "$ENV_DRIFT" ]; then
+    pass "env surface in sync"
+else
+    while IFS= read -r line; do fail "$line"; done <<<"$ENV_DRIFT"
+fi
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
     green "chart validation passed"
