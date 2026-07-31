@@ -1,0 +1,42 @@
+{{ include "schematic-replicator.fullname" . }} is installed.
+
+Image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{- if .Values.redis.cluster.enabled }}
+Redis: cluster mode, {{ .Values.redis.cluster.addrs }}
+{{- else }}
+Redis: {{ .Values.redis.addr }}
+{{- end }}
+
+Check that it came up:
+
+  kubectl rollout status deploy/{{ include "schematic-replicator.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "schematic-replicator.fullname" . }} -f
+
+Point Schematic SDK clients at:
+
+  http://{{ include "schematic-replicator.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/ready
+
+Two things worth knowing:
+
+1. This runs as a single replica with a Recreate strategy, and that is not
+   configurable. The replicator takes a Redis lease at startup and exits if
+   another instance holds it, so a second replica cannot run and a rolling
+   update would deadlock. Expect a brief gap during upgrades: the old pod stops
+   before the new one starts.
+
+2. Readiness reflects initial load progress on the async path. A large dataset
+   can take a while to become ready on first install. If it never does, check
+   the logs for "Could not acquire writer lock" - that means another instance
+   is already writing this Redis.
+{{- if .Values.writerLock.disabled }}
+
+WARNING: writerLock.disabled is true. This instance will not take the lease.
+That is only safe if it never writes the cache; two writers against one Redis
+corrupt the replay cursor and double-write entries.
+{{- end }}
+{{- if and .Values.schematic.apiKey (not .Values.schematic.existingSecret) }}
+
+NOTE: the API key was passed via schematic.apiKey, so it is stored in the Helm
+release and visible to `helm get values`. For production, create a Secret and
+set schematic.existingSecret instead.
+{{- end }}

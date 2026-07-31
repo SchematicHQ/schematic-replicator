@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "schematic-replicator.fullname" . }}
+  labels:
+    {{- include "schematic-replicator.labels" . | nindent 4 }}
+spec:
+  # The replicator is single-writer: it takes a Redis lease at startup and exits
+  # if another instance holds it. Two consequences are hard-coded here rather
+  # than exposed as values, because getting either wrong breaks the deployment:
+  #
+  #   replicas: 1 - a second replica cannot acquire the lease and crash-loops.
+  #   Recreate    - the default RollingUpdate deadlocks. The new pod starts
+  #                 while the old still holds the lease, so it never becomes
+  #                 ready, so the old pod is never terminated.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "schematic-replicator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- /* Build the annotation set first so the key is omitted entirely when
+             empty, rather than rendering `annotations: null`. */}}
+      {{- $annotations := dict }}
+      {{- if include "schematic-replicator.createSecret" . }}
+      {{- $_ := set $annotations "checksum/secret" (include (print $.Template.BasePath "/secret.yaml") . | sha256sum) }}
+      {{- end }}
+      {{- $annotations = merge $annotations .Values.podAnnotations }}
+      {{- with $annotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "schematic-replicator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "schematic-replicator.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: replicator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.config.healthPort }}
+              protocol: TCP
+          env:
+            - name: SCHEMATIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "schematic-replicator.apiKeySecretName" . }}
+                  key: {{ include "schematic-replicator.apiKeySecretKey" . }}
+            {{- if or .Values.redis.password .Values.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret | default (include "schematic-replicator.fullname" .) }}
+                  key: {{ if .Values.redis.existingSecret }}{{ .Values.redis.existingSecretKey }}{{ else }}redis-password{{ end }}
+            {{- end }}
+
+            {{- include "schematic-replicator.optionalEnv" . | trim | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # readOnlyRootFilesystem is on, so /tmp needs to be writable separately.
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
