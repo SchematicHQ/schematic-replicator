@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # Build script for schematic-datastream-replicator Docker image
-# Supports both local dependency and standalone builds
 
 set -euo pipefail
 
@@ -50,15 +49,14 @@ validate_environment() {
     log "Environment validation passed"
 }
 
-# Build function with local dependencies
-build_with_local_deps() {
+# Build function
+build_image() {
     local tag="${REGISTRY:+$REGISTRY/}$IMAGE_NAME:$VERSION"
-    
-    log "Building Docker image with local dependencies: $tag"
-    log "Using parent directory as build context to include local dependencies"
-    log "Build context: $(dirname "$(pwd)")"
-    
-    # Build the image using current directory as context
+
+    log "Building Docker image: $tag"
+    log "Build context: $(pwd)"
+
+    # Build the image using the repository root as context
     docker build \
         --platform linux/amd64 \
         --tag "$tag" \
@@ -75,34 +73,7 @@ build_with_local_deps() {
         docker images "$tag" --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"
         return 0
     else
-        error "Failed to build image with local dependencies"
-    fi
-}
-
-# Build standalone function 
-build_standalone() {
-    local tag="${REGISTRY:+$REGISTRY/}$IMAGE_NAME:$VERSION-standalone"
-    
-    log "Building standalone Docker image: $tag"
-    log "This version requires published dependencies"
-    
-    docker build \
-        --platform linux/amd64 \
-        --tag "$tag" \
-        --file deployments/Dockerfile.standalone \
-        --build-arg VERSION="$VERSION" \
-        --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-        --build-arg VCS_REF="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
-        --build-arg HEALTH_PORT="${HEALTH_PORT:-8090}" \
-        ${BUILD_ARGS} \
-        .
-    
-    if [ $? -eq 0 ]; then
-        log "Standalone image built successfully: $tag"
-        docker images "$tag" --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"
-        return 0
-    else
-        error "Failed to build standalone image"
+        error "Failed to build image"
     fi
 }
 
@@ -168,7 +139,7 @@ main() {
     log "Starting Docker build process for $IMAGE_NAME"
     
     validate_environment
-    build_with_local_deps
+    build_image
     
     if [ "${SKIP_TESTS:-false}" != "true" ]; then
         test_image
@@ -191,10 +162,6 @@ case "${1:-build}" in
     "build")
         main
         ;;
-    "standalone")
-        validate_environment
-        build_standalone
-        ;;
     "scan")
         security_scan "${REGISTRY:+$REGISTRY/}$IMAGE_NAME:$VERSION"
         ;;
@@ -205,9 +172,8 @@ case "${1:-build}" in
         cleanup
         ;;
     *)
-        echo "Usage: $0 [build|standalone|scan|test|clean]"
-        echo "  build:      Build with local dependencies (default)"
-        echo "  standalone: Build standalone image (requires published deps)"
+        echo "Usage: $0 [build|scan|test|clean]"
+        echo "  build:      Build the image (default)"
         echo "  scan:       Run security scan on existing image"
         echo "  test:       Test existing image"
         echo "  clean:      Clean up intermediate images"

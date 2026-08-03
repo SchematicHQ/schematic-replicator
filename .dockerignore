@@ -1,5 +1,7 @@
 # .dockerignore - Minimize build context for security and performance
-# Note: Build context is parent directory (../) so paths are relative to workspace root
+# Build context is the repository root; paths are relative to it.
+# Some **/ patterns date from when sibling repos shared a workspace-root context
+# and are now inert, but are kept as harmless defensive excludes.
 
 # Git directories (all repositories in workspace)
 .git/

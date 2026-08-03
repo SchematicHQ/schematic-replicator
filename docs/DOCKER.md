@@ -63,7 +63,7 @@ make quick        # Build, test, and start stack
 ./dev-build.sh --detached
 
 # Method 3: Using existing build-docker script
-./build-docker.sh && docker compose up -d
+./scripts/build-docker.sh && docker compose up -d
 ```
 
 ### Available Scripts
@@ -92,7 +92,7 @@ docker run --rm --add-host=host.docker.internal:host-gateway alpine/curl \
   curl -I http://host.docker.internal:8080/health
 
 # 3. If successful, start the replicator stack
-docker-compose up
+docker compose -f deployments/docker-compose.yml up
 ```
 
 ## 🚀 Quick Startguration
@@ -118,56 +118,52 @@ You can override this by setting `SCHEMATIC_DATASTREAM_URL` explicitly in your e
 ### Prerequisites
 - Docker (20.10+)
 - Docker Compose (2.0+)
-- Go (1.21+) for building from source
+- Go (1.26+) for building from source (see `go.mod`)
 
 ### Build and Run
 
 ```bash
-# Build with local dependencies (recommended)
-./build-docker.sh
-
-# Build standalone (published deps only)
-./build-docker.sh standalone
+# Build the image
+./scripts/build-docker.sh
 
 # Run with Docker Compose (includes Redis)
-```bash
 SCHEMATIC_API_KEY=your-key docker compose up
 
-# Or run standalone
+# Or run the container on its own (needs a reachable Redis)
 docker run -p 8090:8090 -e SCHEMATIC_API_KEY=your-key schematic-datastream-replicator:latest
 ```
 
-**Note:** Due to local Go module dependencies, use the parent directory as build context:
+Build the image manually with the repository root as the build context:
+
 ```bash
-# Manual build with local dependencies
-docker build -f schematic-datastream-replicator/Dockerfile -t schematic-datastream-replicator .
+docker build -f deployments/Dockerfile -t schematic-datastream-replicator .
 ```
+
+All dependencies are published Go modules, fetched via `GOPROXY` during the
+build, so no sibling checkouts or `replace` directives are required.
 
 ## 🏗️ Build Script
 
-The `build-docker.sh` script implements security best practices and handles local dependencies:
+The `build-docker.sh` script implements security best practices:
 
 ```bash
-# Basic build with local dependencies
-./build-docker.sh
-
-# Build standalone version (published deps only)
-./build-docker.sh standalone
+# Basic build
+./scripts/build-docker.sh
 
 # Custom version and registry
-VERSION=1.0.0 REGISTRY=myregistry.com ./build-docker.sh
+VERSION=1.0.0 REGISTRY=myregistry.com ./scripts/build-docker.sh
 
 # Skip tests and security scan
-SKIP_TESTS=true SECURITY_SCAN=false ./build-docker.sh
+SKIP_TESTS=true SECURITY_SCAN=false ./scripts/build-docker.sh
 
 # Test existing image
-./build-docker.sh test
+./scripts/build-docker.sh test
 
 # Security scan only
-./build-docker.sh scan
+./scripts/build-docker.sh scan
 
 # Clean up intermediate images
-./build-docker.sh clean
+./scripts/build-docker.sh clean
 ```
 
 ### Build Features
@@ -180,10 +176,10 @@ SKIP_TESTS=true SECURITY_SCAN=false ./build-docker.sh
 ## 🔒 Security Features
 
 ### Dockerfile Security
-- **Distroless base image** (`gcr.io/distroless/static-debian12:nonroot`)
-- **Non-root user** (UID 65532)
+- **Minimal Alpine base image** (`alpine:3.24`), carrying only `curl` and `ca-certificates`
+- **Non-root user** (UID 65534, `nobody`)
 - **Static binary** with security flags
-- **Minimal attack surface** (no shell, package manager, etc.)
+- **Minimal attack surface** (multi-stage build; no compiler or source in the runtime image)
 - **Security labels** for compliance
 - **Health checks** for monitoring
 
@@ -198,9 +194,9 @@ SKIP_TESTS=true SECURITY_SCAN=false ./build-docker.sh
 
 | Aspect | Value |
 |--------|-------|
-| Base Image | `gcr.io/distroless/static-debian12:nonroot` |
-| Image Size | ~15-20MB (minimal) |
-| User | Non-root (UID 65532) |
+| Base Image | `alpine:3.24` |
+| Image Size | ~24MB |
+| User | Non-root (UID 65534, `nobody`) |
 | Exposed Ports | 8090 (health/API) |
 | Health Check | Built-in HTTP endpoint |
 
@@ -270,6 +266,7 @@ docker compose down -v
 
 # Use custom health port
 HEALTH_PORT=9090 docker compose up -d
+```
 
 ## 🏥 Health Checks
 
@@ -341,10 +338,22 @@ readinessProbe:
 ```
 
 ## 🚀 Deployment Options
-docker-compose logs -f
+
+### 1. Docker Compose
+
+Brings up the replicator together with Redis. The compose file lives in
+`deployments/`, so pass it explicitly (or use the `task docker-*` wrappers).
+
+```bash
+# Start services
+SCHEMATIC_API_KEY=your-key \
+  docker compose -f deployments/docker-compose.yml up -d
+
+# View logs
+docker compose -f deployments/docker-compose.yml logs -f
 
 # Stop services
-docker-compose down
+docker compose -f deployments/docker-compose.yml down
 ```
 
 ### 2. Standalone Docker
@@ -364,13 +373,23 @@ docker run -d \
 
 ### 3. Kubernetes
 
+**Single-writer constraint**: exactly one replicator instance may write a given
+Redis. Instances acquire a Redis lease at startup and **exit** if another holds
+it, so `replicas` must be `1` and the rollout strategy must be `Recreate`. The
+default `RollingUpdate` strategy deadlocks: the new pod starts while the old
+still holds the lease, the new pod never becomes ready, and the old pod is never
+terminated. To run additional read-only instances, set `WRITER_LOCK_DISABLED=true`
+on those (they must not write the cache).
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: schematic-replicator
 spec:
-  replicas: 2
+  replicas: 1  # single-writer: see note above
+  strategy:
+    type: Recreate  # old pod must release the writer lease before the new one starts
   selector:
     matchLabels:
       app: schematic-replicator
@@ -381,11 +400,11 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65532
-        readOnlyRootFilesystem: true
+        runAsUser: 65534   # 'nobody' in the Alpine runtime image
+        runAsGroup: 65534
       containers:
       - name: replicator
-        image: schematic-datastream-replicator:latest
+        image: getschematic/schematic-replicator:latest
         ports:
         - containerPort: 8090
         env:
@@ -394,11 +413,17 @@ spec:
             secretKeyRef:
               name: schematic-secret
               key: api-key
+        - name: REDIS_ADDR  # required: the app exits if it cannot reach Redis
+          value: "redis:6379"
         securityContext:
           allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true  # container-level field, not pod-level
           capabilities:
             drop:
             - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         resources:
           requests:
             memory: "64Mi"
@@ -418,6 +443,9 @@ spec:
             port: 8090
           initialDelaySeconds: 5
           periodSeconds: 10
+      volumes:
+      - name: tmp  # writable scratch, since the root filesystem is read-only
+        emptyDir: {}
 ```
 
 ## 🔍 Health Checks
@@ -461,13 +489,13 @@ Response format:
    curl -v http://localhost:8090/health
    
    # Check container logs
-   docker-compose logs schematic-replicator
+   docker compose -f deployments/docker-compose.yml logs schematic-replicator
    ```
 
 3. **Redis connection issues**
    ```bash
    # Test Redis connectivity
-   docker-compose exec redis redis-cli ping
+   docker compose -f deployments/docker-compose.yml exec redis redis-cli ping
    ```
 
 4. **Memory issues**
@@ -493,16 +521,25 @@ docker history schematic-datastream-replicator:latest --no-trunc
 3. **Monitoring**: Set up Prometheus metrics and alerts
 4. **Backup**: Ensure Redis data is backed up if persistent
 5. **Security**: Regular security scans and updates
-6. **High Availability**: Run multiple replicas with load balancing
+6. **High Availability**: Run Redis in an HA configuration. The replicator
+   itself is single-writer — only one instance may write a given Redis (see the
+   [single-writer constraint](../README.md#single-writer-constraint)), so
+   availability comes from restarting a failed instance promptly, not from
+   running several in parallel.
 
 ## 🛠️ Development
 
 ```bash
 # Build development image
-./build-docker.sh --tag dev
+VERSION=dev ./scripts/build-docker.sh
 
-# Run development environment
-docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# Run development environment.
+# The override file is NOT auto-loaded when -f is passed explicitly, so list it
+# too. Create it from the .example file or via `task dev-setup`.
+docker compose \
+  -f deployments/docker-compose.yml \
+  -f deployments/docker-compose.override.yml \
+  up
 ```
 
 ## 📝 License

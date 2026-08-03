@@ -5,10 +5,20 @@
 version: '3'
 
 vars:
-  DOCKER_COMPOSE_FILE: deployments/docker-compose.yml
   BINARY_NAME: schematic-datastream-replicator
   HEALTH_URL: http://localhost:8090/health
   READY_URL: http://localhost:8090/ready
+  # Compose only auto-loads docker-compose.override.yml during default file
+  # discovery, which passing -f bypasses. Add it explicitly when present, the
+  # same way scripts/dev-build.sh does. The override is gitignored, so it is
+  # optional and must not be required here.
+  COMPOSE_FILES:
+    sh: |
+      if [ -f deployments/docker-compose.override.yml ]; then
+        echo "-f deployments/docker-compose.yml -f deployments/docker-compose.override.yml"
+      else
+        echo "-f deployments/docker-compose.yml"
+      fi
 
 tasks:
   # Default task - show help
@@ -31,8 +41,8 @@ tasks:
     cmd: ./scripts/build-docker.sh
 
   build-docker-fast:
-    desc: Build Docker image without security checks
-    cmd: ./scripts/build-docker.sh --no-scan --no-test
+    desc: Build Docker image without tests or security scan
+    cmd: SKIP_TESTS=true SECURITY_SCAN=false ./scripts/build-docker.sh
 
   # Development commands
   run:
@@ -52,23 +62,23 @@ tasks:
   # Docker Compose commands
   docker-up:
     desc: Start services with docker compose
-    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} up -d
+    cmd: docker compose {{.COMPOSE_FILES}} up -d
 
   docker-down:
     desc: Stop services with docker compose
-    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} down
+    cmd: docker compose {{.COMPOSE_FILES}} down
 
   docker-logs:
     desc: Show docker compose logs
-    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
+    cmd: docker compose {{.COMPOSE_FILES}} logs -f
 
   docker-restart:
     desc: Restart services
-    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} restart
+    cmd: docker compose {{.COMPOSE_FILES}} restart
 
   docker-clean:
     desc: Clean up docker resources
-    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} down -v --rmi all
+    cmd: docker compose {{.COMPOSE_FILES}} down -v --rmi all
 
   # Static analysis and security
   lint:
@@ -112,25 +122,25 @@ tasks:
 
   dev-logs:
     desc: View development logs
-    cmd: docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
+    cmd: docker compose {{.COMPOSE_FILES}} logs -f
 
   dev-exec:
     desc: Execute shell in development container
     cmds:
       - echo "Opening shell in development container..."
-      - docker compose -f {{.DOCKER_COMPOSE_FILE}} exec schematic-replicator sh || echo "Container not running - start with 'task dev-build'"
+      - docker compose {{.COMPOSE_FILES}} exec schematic-replicator sh || echo "Container not running - start with 'task dev-build'"
 
   dev-down:
     desc: Stop development environment
     cmds:
       - echo "Stopping development environment..."
-      - docker compose -f {{.DOCKER_COMPOSE_FILE}} down
+      - docker compose {{.COMPOSE_FILES}} down
 
   dev-clean:
     desc: Clean development environment (nuclear option)
     cmds:
       - echo "Cleaning development environment..."
-      - docker compose -f {{.DOCKER_COMPOSE_FILE}} down --rmi all --volumes --remove-orphans || true
+      - docker compose {{.COMPOSE_FILES}} down --rmi all --volumes --remove-orphans || true
       - docker image prune -f
 
   # System checks
