@@ -46,7 +46,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
     -o schematic-datastream-replicator \
     .
 
-# Runtime stage using Alpine for minimal attack surface with built-in curl
+# Runtime stage using Alpine for minimal attack surface
 FROM alpine:3.24
 
 # Re-declare build args for runtime stage
@@ -58,8 +58,12 @@ ARG REVISION
 ARG HEALTH_PORT=8090
 ENV HEALTH_PORT=${HEALTH_PORT}
 
-# Install curl and ca-certificates for health checks
-RUN apk add --no-cache curl ca-certificates
+# Apply outstanding base-image security patches and install ca-certificates for
+# outbound TLS. Deliberately no curl: it pulls in libcurl, c-ares, nghttp2 and
+# five more transitive packages, which historically account for nearly every CVE
+# reported against this image. Health checks use the binary's own `healthcheck`
+# subcommand instead (Kubernetes probes use httpGet and never needed curl).
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 
 # Copy the binary from builder stage
 COPY --from=builder /app/schematic-datastream-replicator /app/schematic-datastream-replicator

@@ -67,6 +67,7 @@ const (
 	defaultCacheTTL             = 0 * time.Second // Unlimited cache by default
 	defaultCacheCleanupInterval = 1 * time.Hour   // Clean up stale cache entries every hour
 	defaultHealthPort           = 8090
+	healthCheckTimeout          = 5 * time.Second // Timeout for the self-health-check probe
 	cacheKeyPrefix              = "schematic"
 	cacheKeyPrefixCompany       = "company"
 	cacheKeyPrefixUser          = "user"
@@ -324,7 +325,50 @@ func (hs *HealthServer) readinessHandler(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// healthPortFromEnv reads the health server port, falling back to the default
+// when HEALTH_PORT is unset or unparseable.
+func healthPortFromEnv() int {
+	if portStr := os.Getenv("HEALTH_PORT"); portStr != "" {
+		if parsedPort, err := strconv.Atoi(portStr); err == nil && parsedPort > 0 {
+			return parsedPort
+		}
+	}
+	return defaultHealthPort
+}
+
+// runHealthCheck probes an endpoint on the local health server and reports the
+// exit code the process should use. It lets a container health-check itself, so
+// the runtime image doesn't need to ship curl and its dependency chain.
+func runHealthCheck(path string) int {
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", healthPortFromEnv(), path)
+
+	client := &http.Client{Timeout: healthCheckTimeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "health check failed: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "health check failed: %s returned %d\n", url, resp.StatusCode)
+		return 1
+	}
+
+	return 0
+}
+
 func main() {
+
+	// Self-check mode: `schematic-datastream-replicator healthcheck [path]`.
+	// Handled before any other setup so it stays a cheap, dependency-free probe.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		path := "/health"
+		if len(os.Args) > 2 {
+			path = os.Args[2]
+		}
+		os.Exit(runHealthCheck(path))
+	}
 
 	// Get API key from environment
 	apiKey := os.Getenv(apiKeyEnvVar)
@@ -384,12 +428,7 @@ func main() {
 	}
 
 	// Get health server port from environment
-	healthPort := defaultHealthPort
-	if portStr := os.Getenv("HEALTH_PORT"); portStr != "" {
-		if parsedPort, err := strconv.Atoi(portStr); err == nil && parsedPort > 0 {
-			healthPort = parsedPort
-		}
-	}
+	healthPort := healthPortFromEnv()
 
 	// Configure WebSocket options early so we can populate them as we parse environment variables
 	wsOptions := schematicdatastreamws.ClientOptions{
