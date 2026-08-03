@@ -317,7 +317,7 @@ VERBOSE=true ./health-check.sh
 #### Docker Swarm
 ```yaml
 healthcheck:
-  test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8090/health"]
+  test: ["CMD", "/app/schematic-datastream-replicator", "healthcheck"]
   interval: 30s
   timeout: 10s
   retries: 3
@@ -431,6 +431,23 @@ curl http://localhost:8090/health
 # Check if service is ready to receive traffic
 curl http://localhost:8090/ready
 ```
+
+### Checking from inside the container
+
+The runtime image ships no HTTP client — `curl` and its dependency chain were
+removed because they accounted for nearly every CVE reported against the image.
+The binary probes itself instead, exiting 0 when the endpoint returns 200:
+
+```bash
+# Liveness (defaults to /health)
+docker exec <container> /app/schematic-datastream-replicator healthcheck
+
+# Readiness
+docker exec <container> /app/schematic-datastream-replicator healthcheck /ready
+```
+
+It honors `HEALTH_PORT`, so it follows a non-default port automatically.
+Kubernetes probes use `httpGet` and need nothing installed in the image.
 
 Response format:
 ```json

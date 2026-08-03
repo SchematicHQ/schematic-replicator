@@ -40,7 +40,7 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_DB=${REDIS_DB:-0}
     healthcheck:
-        test: ["CMD-SHELL", "curl -f http://localhost:8090/health || exit 1"]
+        test: ["CMD", "/app/schematic-datastream-replicator", "healthcheck"]
         interval: 10s
         timeout: 10s
         retries: 3
@@ -56,9 +56,11 @@ services:
       - /tmp:noexec,nosuid,size=10m
     networks:
       - replicator-network
-    # External health check - use HTTP endpoints from outside the container
+    # In-container health check uses the binary's own `healthcheck` subcommand,
+    # so the image doesn't need curl installed. Pass `/ready` as an argument to
+    # probe readiness instead of liveness.
     # For Kubernetes: configure liveness/readiness probes to use /health and /ready endpoints
-    # For development: monitor via curl http://localhost:${HEALTH_PORT:-8090}/health
+    # For development: monitor via curl http://localhost:${HEALTH_PORT:-8090}/health from the host
 
   redis:
     image: redis:7-alpine
