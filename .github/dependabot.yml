@@ -29,3 +29,14 @@ updates:
     labels:
       - "docker"
       - "Dependabot"
+    ignore:
+      # Go ships release candidates as bare-suffix tags (golang:1.27rc2), which
+      # Dependabot ranks as a plain minor bump of the builder pin. Globs like
+      # "*rc*" are NOT the fix: the docker ecosystem parses ignore.versions as a
+      # Bundler requirement, so a glob is a hard validation error that disables
+      # this whole file. Gating the minor works because it expands to
+      # ">= 1.27.a, < 2", and the ".a" is what catches 1.27rc2. Patch bumps (the
+      # CVE ones) still come through; stable minors become a manual FROM edit to
+      # deployments/Dockerfile and Dockerfile.single-arch.
+      - dependency-name: "golang"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
