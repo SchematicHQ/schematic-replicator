@@ -470,6 +470,15 @@ func main() {
 	}
 	logger.Info(context.Background(), fmt.Sprintf("Health server port: %d", healthPort))
 
+	// Tracing is opt-in and stays off unless an OTLP endpoint is configured, so
+	// a self-hosted replicator that wants nothing to do with it pays nothing.
+	// See README.md, "OpenTelemetry tracing".
+	shutdownTracing, tracingErr := initTracing(context.Background(), logger)
+	if tracingErr != nil {
+		logger.Error(context.Background(), fmt.Sprintf("Failed to initialize tracing: %v", tracingErr))
+		shutdownTracing = func(context.Context) error { return nil }
+	}
+
 	// Create cache providers - only Redis, no local cache fallback
 	var companiesCache CacheProvider[*rulesengine.Company]
 	var usersCache CacheProvider[*rulesengine.User]
@@ -838,6 +847,13 @@ func main() {
 	if writerLock != nil {
 		lockCancel()
 		writerLock.Release(context.Background())
+	}
+
+	// Flush buffered spans last, on a context of its own: everything above has
+	// already stopped producing them, and the shutdown contexts up there are
+	// spent.
+	if err := shutdownTracing(context.Background()); err != nil {
+		logger.Warn(context.Background(), fmt.Sprintf("Error shutting down tracing: %v", err))
 	}
 
 	logger.Info(context.Background(), "Datastream replicator stopped")
