@@ -7,7 +7,7 @@ require (
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/schematichq/rulesengine v0.1.20
 	github.com/schematichq/schematic-datastream-ws v0.2.9
-	github.com/schematichq/schematic-go v1.5.4
+	github.com/schematichq/schematic-go v1.5.6
 	github.com/stretchr/testify v1.12.1
 )
 
@@ -16,8 +16,9 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
+	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
 )
