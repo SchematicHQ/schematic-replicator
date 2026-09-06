@@ -269,6 +269,26 @@ go build .  # Creates schematic-datastream-replicator binary
 
 ## Client Integration
 
+### Redis key layout
+
+The replicator writes, and SDKs in replicator mode read, these keys (`<version>`
+is the rules engine cache version reported on `/health` as `cache_version`):
+
+| Data | Key |
+| -- | -- |
+| Flag | `schematic:flags:<version>:<flag key, lowercased>` |
+| Company by id | `schematic:company:<version>:<company id>` |
+| Company by lookup key | `schematic:company:<version>:<key name, lowercased>:<value, lowercased>` |
+| User by id | `schematic:user:<version>:<user id>` |
+| User by lookup key | `schematic:user:<version>:<key name, lowercased>:<value, lowercased>` |
+
+The `schematic:` prefix is not configurable here. An SDK's Redis provider prefix
+plus its datastream key must produce exactly these strings, so an SDK configured
+with any other prefix (or one that adds `schematic:` twice) never finds a key and
+silently falls back to the REST API. `testdata/redis_key_layout.json` is the
+contract: `TestRedisKeyLayoutMatchesFixture` checks the builders here, and each
+SDK carries a unit test against the same cases.
+
 ### DataStream
 
 The Schematic Go client can be configured to work with the replicator service for ultra-fast feature flag evaluations.
