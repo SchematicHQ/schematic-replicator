@@ -3,7 +3,7 @@ module github.com/schematichq/schematic-datastream-replicator
 go 1.26.2
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/alicebob/miniredis/v2 v2.39.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/schematichq/rulesengine v0.1.22
 	github.com/schematichq/schematic-datastream-ws v0.2.9
