@@ -15,6 +15,9 @@ import (
 	schematicgo "github.com/schematichq/schematic-go"
 	"github.com/schematichq/schematic-go/client"
 	"github.com/schematichq/schematic-go/datastream"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // CircuitBreakerState represents the state of a circuit breaker
@@ -702,9 +705,14 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 		return
 	}
 
+	ctx, span := startBatchSpan(ctx, "company", len(jobs))
+	defer span.End()
+
 	// Check circuit breaker before proceeding
 	if !h.redisCircuitBreaker.CanExecute() {
 		h.logger.Warn(ctx, fmt.Sprintf("Circuit breaker open, dropping %d company messages", len(jobs)))
+		span.SetAttributes(attribute.Bool("replicator.circuit_breaker.open", true))
+		span.SetStatus(codes.Error, "circuit breaker open")
 		return
 	}
 
@@ -840,8 +848,13 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 		return
 	}
 
+	ctx, span := startBatchSpan(ctx, "user", len(jobs))
+	defer span.End()
+
 	if !h.redisCircuitBreaker.CanExecute() {
 		h.logger.Warn(ctx, fmt.Sprintf("Circuit breaker open, dropping %d user messages", len(jobs)))
+		span.SetAttributes(attribute.Bool("replicator.circuit_breaker.open", true))
+		span.SetStatus(codes.Error, "circuit breaker open")
 		return
 	}
 
@@ -971,8 +984,13 @@ func (h *AsyncReplicatorMessageHandler) processBatchedFlagsMessages(ctx context.
 		return
 	}
 
+	ctx, span := startBatchSpan(ctx, "flags", len(jobs))
+	defer span.End()
+
 	if !h.redisCircuitBreaker.CanExecute() {
 		h.logger.Warn(ctx, fmt.Sprintf("Circuit breaker open, dropping %d flags messages", len(jobs)))
+		span.SetAttributes(attribute.Bool("replicator.circuit_breaker.open", true))
+		span.SetStatus(codes.Error, "circuit breaker open")
 		return
 	}
 
@@ -1027,10 +1045,18 @@ func (h *AsyncReplicatorMessageHandler) parseUserMessage(message *schematicdatas
 
 // batchCacheCompanies caches multiple companies using batch operations when possible.
 // Writes full company to ID keys and company ID strings to lookup keys.
-func (h *AsyncReplicatorMessageHandler) batchCacheCompanies(ctx context.Context, companies []*rulesengine.Company) error {
+func (h *AsyncReplicatorMessageHandler) batchCacheCompanies(ctx context.Context, companies []*rulesengine.Company) (err error) {
 	if len(companies) == 0 {
 		return nil
 	}
+
+	ctx, span := startCacheSpan(ctx, "cache", "company", len(companies))
+	// Named return: every failure path below is a red span without each
+	// one having to remember to say so.
+	defer func() {
+		recordSpanError(span, err)
+		span.End()
+	}()
 
 	// Build batch maps for ID keys (full company) and lookup keys (company ID string)
 	idItems := make(map[string]*rulesengine.Company)
@@ -1105,10 +1131,18 @@ func (h *AsyncReplicatorMessageHandler) batchCacheCompanies(ctx context.Context,
 
 // batchCacheUsers caches multiple users using batch operations when possible.
 // Writes full user to ID keys and user ID strings to lookup keys.
-func (h *AsyncReplicatorMessageHandler) batchCacheUsers(ctx context.Context, users []*rulesengine.User) error {
+func (h *AsyncReplicatorMessageHandler) batchCacheUsers(ctx context.Context, users []*rulesengine.User) (err error) {
 	if len(users) == 0 {
 		return nil
 	}
+
+	ctx, span := startCacheSpan(ctx, "cache", "user", len(users))
+	// Named return: every failure path below is a red span without each
+	// one having to remember to say so.
+	defer func() {
+		recordSpanError(span, err)
+		span.End()
+	}()
 
 	// Build batch maps for ID keys (full user) and lookup keys (user ID string)
 	idItems := make(map[string]*rulesengine.User)
@@ -1180,10 +1214,18 @@ func (h *AsyncReplicatorMessageHandler) batchCacheUsers(ctx context.Context, use
 
 // batchDeleteCompanies deletes multiple companies using batch operations when possible.
 // Deletes both ID keys and lookup keys.
-func (h *AsyncReplicatorMessageHandler) batchDeleteCompanies(ctx context.Context, companies []*rulesengine.Company) error {
+func (h *AsyncReplicatorMessageHandler) batchDeleteCompanies(ctx context.Context, companies []*rulesengine.Company) (err error) {
 	if len(companies) == 0 {
 		return nil
 	}
+
+	ctx, span := startCacheSpan(ctx, "delete", "company", len(companies))
+	// Named return: every failure path below is a red span without each
+	// one having to remember to say so.
+	defer func() {
+		recordSpanError(span, err)
+		span.End()
+	}()
 
 	// Collect ID keys and lookup keys separately
 	idKeysMap := make(map[string]bool)
@@ -1241,10 +1283,18 @@ func (h *AsyncReplicatorMessageHandler) batchDeleteCompanies(ctx context.Context
 
 // batchDeleteUsers deletes multiple users using batch operations when possible.
 // Deletes both ID keys and lookup keys.
-func (h *AsyncReplicatorMessageHandler) batchDeleteUsers(ctx context.Context, users []*rulesengine.User) error {
+func (h *AsyncReplicatorMessageHandler) batchDeleteUsers(ctx context.Context, users []*rulesengine.User) (err error) {
 	if len(users) == 0 {
 		return nil
 	}
+
+	ctx, span := startCacheSpan(ctx, "delete", "user", len(users))
+	// Named return: every failure path below is a red span without each
+	// one having to remember to say so.
+	defer func() {
+		recordSpanError(span, err)
+		span.End()
+	}()
 
 	// Collect ID keys and lookup keys separately
 	idKeysMap := make(map[string]bool)
