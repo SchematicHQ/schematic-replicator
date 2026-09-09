@@ -37,6 +37,10 @@ COPY . .
 # Use TARGETARCH and TARGETPLATFORM for cross-compilation to avoid QEMU issues
 ARG TARGETARCH
 ARG TARGETOS
+# Re-declare the global build args so they are in scope for the go build below
+ARG BUILDTIME
+ARG VERSION
+ARG REVISION
 # Disable Go's race detector and set build mode to avoid QEMU conflicts
 ENV GORACE=halt_on_error=1
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
