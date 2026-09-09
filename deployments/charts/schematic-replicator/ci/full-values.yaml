@@ -1,0 +1,70 @@
+# Exercises every optional path at once.
+schematic:
+  apiKey: ci-test-key
+  apiUrl: https://api.example.com
+  datastreamUrl: wss://api.example.com/datastream
+redis:
+  addr: redis:6379
+  db: 3
+  maintenanceNotifications: true
+config:
+  logLevel: debug
+  healthPort: 9090
+  cacheTtl: 30m
+  cacheCleanupInterval: 2h
+writerLock:
+  ttl: 20s
+  key: custom:writer:lock
+replay:
+  cursorKey: custom:replay:cursor
+websocket:
+  pingInterval: 15s
+  pongWait: 25s
+async:
+  useAsyncLoading: false
+  loaderPageSize: 250
+  loaderCircuitBreakerThreshold: 7
+  loaderCircuitBreakerTimeout: 45s
+  loaderMaxConcurrentRequests: 8
+  loaderRateLimitRps: 20
+  numWorkers: 12
+  batchSize: 20
+  batchTimeout: 50ms
+  companyChannelSize: 1000
+  userChannelSize: 1000
+  flagsChannelSize: 200
+  circuitBreakerThreshold: 5
+  circuitBreakerTimeout: 30s
+extraEnv:
+  CUSTOM_FLAG: "enabled"
+extraEnvRaw:
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+service:
+  type: LoadBalancer
+  port: 9090
+  annotations:
+    example.com/annotation: "true"
+serviceAccount:
+  create: false
+  name: preexisting-sa
+podAnnotations:
+  example.com/pod: "true"
+podLabels:
+  tier: cache
+nodeSelector:
+  disktype: ssd
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: replicator
+    effect: NoSchedule
+priorityClassName: high-priority
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi

@@ -1,0 +1,169 @@
+# Default values for schematic-replicator.
+
+image:
+  repository: getschematic/schematic-replicator
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Schematic API credentials and endpoints.
+schematic:
+  # -- API key. Ignored when existingSecret is set.
+  apiKey: ""
+  # -- Read the API key from a Secret you manage instead of templating it here.
+  # This is the recommended path: it keeps the key out of `helm get values`.
+  existingSecret: ""
+  # -- Key within existingSecret holding the API key.
+  existingSecretKey: api-key
+  # -- Schematic API base URL.
+  apiUrl: ""
+  # -- WebSocket datastream endpoint. Derived from apiUrl when empty.
+  datastreamUrl: ""
+
+# -- Redis connection. Redis is REQUIRED: the replicator exits at startup if it
+# cannot connect. This chart does not deploy Redis; point it at your own.
+redis:
+  # -- Address as host:port. NOT a redis:// URL - this value is passed straight
+  # to the go-redis client's Addr field and a URL scheme will fail to dial.
+  addr: redis:6379
+  # -- Password. Ignored when existingSecret is set.
+  password: ""
+  # -- Read the Redis password from a Secret you manage.
+  existingSecret: ""
+  # -- Key within existingSecret holding the password.
+  existingSecretKey: redis-password
+  db: 0
+  tls: false
+  # -- Redis Cloud/Enterprise maintenance notifications. Off unless you know you
+  # need it.
+  maintenanceNotifications: false
+  cluster:
+    enabled: false
+    # -- Comma-separated host:port list, used when cluster.enabled is true.
+    addrs: ""
+
+# -- Application behaviour.
+config:
+  logLevel: info
+  healthPort: 8090
+  # -- Cache entry TTL. Empty means unlimited, which is the app default.
+  cacheTtl: ""
+  # -- How often stale cache entries are swept.
+  cacheCleanupInterval: ""
+
+# -- Single-writer lease. Exactly one instance may write a given Redis; a second
+# one exits at startup rather than corrupting the replay cursor. Disabling the
+# lease on an instance that writes reintroduces exactly that corruption.
+writerLock:
+  disabled: false
+  ttl: ""
+  key: ""
+
+# -- Datastream replay on reconnect.
+replay:
+  disabled: false
+  cursorKey: ""
+
+# -- WebSocket keepalive, tuned against your load balancer's idle timeout.
+websocket:
+  pingInterval: ""
+  pongWait: ""
+
+# -- Initial load and async processing tuning. Every value here is optional;
+# empty means the application's own default applies.
+async:
+  useAsyncLoading: true
+  loaderPageSize: ""
+  loaderCircuitBreakerThreshold: ""
+  loaderCircuitBreakerTimeout: ""
+  loaderMaxConcurrentRequests: ""
+  loaderRateLimitRps: ""
+  numWorkers: ""
+  batchSize: ""
+  batchTimeout: ""
+  companyChannelSize: ""
+  userChannelSize: ""
+  flagsChannelSize: ""
+  circuitBreakerThreshold: ""
+  circuitBreakerTimeout: ""
+
+# -- Arbitrary extra environment variables, as a name/value map. Use this for
+# any setting the chart does not model as a first-class value.
+extraEnv: {}
+
+# -- Extra env entries in raw Kubernetes form, for valueFrom / fieldRef.
+extraEnvRaw: []
+
+service:
+  type: ClusterIP
+  port: 8090
+  annotations: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# -- replicaCount is intentionally absent. The single-writer lease means a
+# second writer exits at startup, so the Deployment is pinned to 1 replica with
+# a Recreate strategy. See templates/deployment.yaml.
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# -- Pod-level security context. UID 65534 is `nobody` in the Alpine runtime
+# image the replicator ships.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+
+# -- Container-level security context. The image runs fine read-only; the chart
+# mounts an emptyDir at /tmp to cover it.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# -- Readiness gates traffic and, on the async path, reflects initial load
+# progress. initialDelaySeconds is deliberately small; failureThreshold carries
+# the wait for large datasets.
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+# -- Extra time for the writer lease to be released on shutdown.
+terminationGracePeriodSeconds: 30
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

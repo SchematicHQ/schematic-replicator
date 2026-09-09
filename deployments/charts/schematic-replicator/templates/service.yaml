@@ -1,0 +1,24 @@
+{{/*
+The Schematic SDK in replicator mode polls this service's /ready endpoint (see
+core.WithReplicatorHealthURL), so clients need a stable address for it even
+though cache reads go to Redis directly.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "schematic-replicator.fullname" . }}
+  labels:
+    {{- include "schematic-replicator.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: health
+      port: {{ .Values.service.port }}
+      targetPort: health
+      protocol: TCP
+  selector:
+    {{- include "schematic-replicator.selectorLabels" . | nindent 4 }}
