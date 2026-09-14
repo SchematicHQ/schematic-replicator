@@ -41,7 +41,6 @@ For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 - `CACHE_CLEANUP_INTERVAL`: Cleanup stale cache entries interval (default: `1h`, format: `30m`, `2h`, `0s` to disable)
 - `LOG_LEVEL`: Logging level - `debug`, `info`, `warn`, `error` (default: `info`)
 - `HEALTH_PORT`: Health server port (default: `8090`)
-- `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP collector endpoint. Setting it turns tracing on; leaving it unset turns tracing off. See [OpenTelemetry tracing](#opentelemetry-tracing).
 
 ### WebSocket Keepalive Configuration
 Configure ping/pong intervals to handle load balancer timeouts:
@@ -154,6 +153,27 @@ strategy that stops the old instance before starting the new one (Kubernetes
   `schematic:datastream:writer_lock`). Change only to run independent replicators
   against separate keyspaces in one Redis.
 
+### OpenTelemetry Tracing
+
+The replicator can export traces over OTLP to any collector or backend that
+speaks it (OpenTelemetry Collector, Datadog, Jaeger, Honeycomb, etc.). Tracing
+is **off by default**: nothing is exported and no spans are recorded until an
+endpoint is set. Configuration uses the standard
+[`OTEL_*` environment variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/):
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: Collector base URL, e.g. `http://localhost:4318` (default: unset, tracing off)
+- `OTEL_EXPORTER_OTLP_PROTOCOL`: `http/protobuf` or `grpc` (default: `http/protobuf`)
+- `OTEL_EXPORTER_OTLP_HEADERS`: Comma-separated `key=value` pairs, for backends that authenticate with a header
+- `OTEL_SERVICE_NAME`: Service name on every span (default: `schematic-replicator`)
+- `OTEL_RESOURCE_ATTRIBUTES`: Comma-separated `key=value` pairs added to every span, e.g. `deployment.environment=prod`
+
+The replicator emits one trace per batch of replicated messages: a root span
+(`replicate company`, `replicate user`, or `replicate flags`) with a child span
+per Redis pipeline write or delete. Every span carries `replicator.entity` and
+`replicator.batch.size`; a batch dropped because the Redis circuit breaker is
+open is recorded as a failed span with `replicator.circuit_breaker.open`. All
+spans are sampled; set sampling in your collector.
+
 ## Usage
 
 ### Docker Development
@@ -255,81 +275,6 @@ export REDIS_ADDR="localhost:6379"
 export CACHE_CLEANUP_INTERVAL="1h"  # Clean up stale entries hourly (default)
 ./schematic-datastream-replicator
 ```
-
-## OpenTelemetry tracing
-
-The replicator can export traces over OTLP. Tracing is **off by default** and
-costs nothing when off — no exporter is started and no spans are recorded.
-
-There is no vendor-specific code here and no Schematic-specific switch. The
-replicator is a plain OpenTelemetry producer configured entirely through the
-[standard `OTEL_*` environment variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/),
-so it works with any collector or backend that speaks OTLP — the OpenTelemetry
-Collector, Jaeger, Grafana Tempo, Honeycomb, Datadog, or whatever you already
-run.
-
-### Turning it on
-
-Set an endpoint. That is the whole switch:
-
-```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
-```
-
-Point it at a collector you control. Sending directly to a vendor works too:
-
-```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.honeycomb.io"
-export OTEL_EXPORTER_OTLP_HEADERS="x-honeycomb-team=$HONEYCOMB_API_KEY"
-```
-
-### Configuration
-
-| Variable | Default | Notes |
-|---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset — tracing off)* | Collector base URL. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` also works and wins if both are set. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | Set to `grpc` to use the gRPC exporter (port 4317 rather than 4318). |
-| `OTEL_EXPORTER_OTLP_HEADERS` | *(none)* | Comma-separated `key=value` pairs, for backends that authenticate with a header. |
-| `OTEL_SERVICE_NAME` | `schematic-replicator` | Override if you run more than one replicator. |
-| `OTEL_RESOURCE_ATTRIBUTES` | *(none)* | Comma-separated `key=value` pairs added to every span, e.g. `deployment.environment=prod,region=us-east-1`. |
-
-Sampling is deliberately not exposed as a variable of ours. The replicator
-samples everything and leaves the decision to your collector, where you can
-change it without redeploying.
-
-### What gets traced
-
-One trace per batch of replicated messages, not per message. The batch is the
-unit that succeeds or fails, and a span per message would be both enormous and
-uninformative.
-
-```
-replicate company                 (root; replicator.batch.size = N)
-├── cache company                 (Redis pipeline write)
-└── delete company                (Redis pipeline delete)
-```
-
-Root spans are `replicate company`, `replicate user`, and `replicate flags`.
-Every span carries `replicator.entity` and `replicator.batch.size`. A batch
-dropped because the Redis circuit breaker is open is a failed span carrying
-`replicator.circuit_breaker.open`, so a trace explains its own red bar without
-needing the logs.
-
-### Verifying it works
-
-The quickest local check is a collector that prints what it receives:
-
-```bash
-docker run --rm -p 4318:4318 \
-  otel/opentelemetry-collector-contrib:latest \
-  --set=receivers.otlp.protocols.http.endpoint=0.0.0.0:4318 \
-  --set=exporters.debug.verbosity=detailed \
-  --set=service.pipelines.traces.receivers=[otlp] \
-  --set=service.pipelines.traces.exporters=[debug]
-```
-
-On startup the replicator logs `OpenTelemetry tracing enabled`. If it does not,
-the endpoint is not set and everything above is inert.
 
 ## Building
 
