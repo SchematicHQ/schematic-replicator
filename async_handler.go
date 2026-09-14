@@ -813,6 +813,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 
 	if len(toCache) > 0 {
 		if err := h.batchCacheCompanies(ctx, toCache); err != nil {
+			recordSpanError(span, err)
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch company cache failed: %v", err))
 		} else {
@@ -826,6 +827,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 
 	if len(toDelete) > 0 {
 		if err := h.batchDeleteCompanies(ctx, toDelete); err != nil {
+			recordSpanError(span, err)
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch company delete failed: %v", err))
 		} else {
@@ -951,6 +953,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 
 	if len(toCache) > 0 {
 		if err := h.batchCacheUsers(ctx, toCache); err != nil {
+			recordSpanError(span, err)
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch user cache failed: %v", err))
 		} else {
@@ -964,6 +967,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 
 	if len(toDelete) > 0 {
 		if err := h.batchDeleteUsers(ctx, toDelete); err != nil {
+			recordSpanError(span, err)
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Batch user delete failed: %v", err))
 		} else {
@@ -1014,6 +1018,7 @@ func (h *AsyncReplicatorMessageHandler) processBatchedFlagsMessages(ctx context.
 			continue
 		}
 		if err != nil {
+			recordSpanError(span, err)
 			h.redisCircuitBreaker.RecordFailure()
 			h.logger.Error(ctx, fmt.Sprintf("Failed to process flags message (%s): %v", job.Message.EntityType, err))
 		} else {

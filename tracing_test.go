@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -85,5 +87,37 @@ func TestBatchSpansCarryEntityAndSize(t *testing.T) {
 		if got["replicator.batch.size"] != "12" {
 			t.Errorf("%s: replicator.batch.size = %q", s.Name(), got["replicator.batch.size"])
 		}
+	}
+}
+
+// A failed child leaves the batch span red as well. A trace list filtered on
+// error status has to show the batch, not only the Redis pipeline under it.
+func TestRecordSpanErrorMarksSpanFailed(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	_, ok := startBatchSpan(context.Background(), "company", 1)
+	recordSpanError(ok, nil)
+	ok.End()
+
+	_, failed := startBatchSpan(context.Background(), "user", 1)
+	recordSpanError(failed, errors.New("redis: connection refused"))
+	failed.End()
+
+	ended := recorder.Ended()
+	if len(ended) != 2 {
+		t.Fatalf("got %d spans, want 2", len(ended))
+	}
+	if got := ended[0].Status().Code; got != codes.Unset {
+		t.Errorf("nil error: status = %v, want Unset", got)
+	}
+	if got := ended[1].Status(); got.Code != codes.Error || got.Description != "redis: connection refused" {
+		t.Errorf("error: status = %+v, want Error with the message", got)
+	}
+	if len(ended[1].Events()) != 1 || ended[1].Events()[0].Name != "exception" {
+		t.Errorf("error: events = %+v, want one exception event", ended[1].Events())
 	}
 }
