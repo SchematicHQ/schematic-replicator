@@ -7,7 +7,7 @@ require (
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/schematichq/rulesengine v0.1.25
 	github.com/schematichq/schematic-datastream-ws v0.2.10
-	github.com/schematichq/schematic-go v1.5.4
+	github.com/schematichq/schematic-go v1.5.8
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.46.0
@@ -26,6 +26,7 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
+	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/metric v1.46.0 // indirect

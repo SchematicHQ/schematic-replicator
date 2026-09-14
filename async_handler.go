@@ -776,9 +776,19 @@ func (h *AsyncReplicatorMessageHandler) processBatchedCompanyMessages(ctx contex
 					continue
 				}
 			}
-			merged, mergeErr := datastream.PartialCompany(base, job.Message.Data)
+			sdkBase, convErr := toSDKCompany(base)
+			if convErr != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company '%s': %v", job.EntityKey, convErr))
+				continue
+			}
+			sdkMerged, mergeErr := datastream.PartialCompany(sdkBase, job.Message.Data)
 			if mergeErr != nil {
 				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company '%s': %v", job.EntityKey, mergeErr))
+				continue
+			}
+			merged, convErr := fromSDKCompany(sdkMerged)
+			if convErr != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company '%s': %v", job.EntityKey, convErr))
 				continue
 			}
 			st.company, st.present, st.touched, st.readFailed = merged, true, true, false
@@ -919,9 +929,19 @@ func (h *AsyncReplicatorMessageHandler) processBatchedUserMessages(ctx context.C
 					continue
 				}
 			}
-			merged, mergeErr := datastream.PartialUser(base, job.Message.Data)
+			sdkBase, convErr := toSDKUser(base)
+			if convErr != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user '%s': %v", job.EntityKey, convErr))
+				continue
+			}
+			sdkMerged, mergeErr := datastream.PartialUser(sdkBase, job.Message.Data)
 			if mergeErr != nil {
 				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user '%s': %v", job.EntityKey, mergeErr))
+				continue
+			}
+			merged, convErr := fromSDKUser(sdkMerged)
+			if convErr != nil {
+				h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user '%s': %v", job.EntityKey, convErr))
 				continue
 			}
 			st.user, st.present, st.touched, st.readFailed = merged, true, true, false
