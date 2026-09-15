@@ -17,9 +17,8 @@ import (
 // boundary instead.
 //
 // Every JSON-tagged field of the two packages agrees except for these, checked
-// against rulesengine v0.1.25 and schematic-go v1.5.8:
+// against rulesengine v0.1.25 and schematic-go v1.6.1:
 //
-//	Company.CreditPostpaid  credit_postpaid,omitempty  | field absent
 //	Company.CreditBalances  credit_balances            | credit_balances,omitempty
 //	Company.Keys            keys                       | keys,omitempty
 //	User.Keys               keys                       | keys,omitempty
@@ -53,12 +52,6 @@ func toSDKCompany(in *rulesengine.Company) (*sgre.Company, error) {
 }
 
 // fromSDKCompany converts schematic-go's company model back into the cached one.
-//
-// TODO(SCH-7408): schematic-go's Company has no CreditPostpaid field, so the round
-// trip drops it. That is not a regression — schematic-go's DeepCopyCompany has
-// never carried the field either, so every partial company merge already clears it
-// — and restoring it here would jump the sequencing SCH-7408 owns. Once
-// schematic-go carries the field it starts flowing through with no change here.
 func fromSDKCompany(in *sgre.Company) (*rulesengine.Company, error) {
 	if in == nil {
 		return nil, nil
