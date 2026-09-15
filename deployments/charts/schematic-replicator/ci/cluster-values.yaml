@@ -1,0 +1,9 @@
+# Redis cluster mode: REDIS_ADDR must be replaced by REDIS_CLUSTER_ADDRS.
+schematic:
+  apiKey: ci-test-key
+redis:
+  cluster:
+    enabled: true
+    addrs: "node-a:7000,node-b:7001,node-c:7002"
+  tls: true
+  password: ci-redis-password

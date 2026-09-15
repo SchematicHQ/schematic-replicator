@@ -4,8 +4,11 @@
 *.dll
 *.so
 *.dylib
-schematic-datastream-replicator
-schematic-replicator
+# Anchored to the repo root: these are the compiled binaries. Unanchored, the
+# patterns would also match any directory of the same name at any depth (such as
+# deployments/charts/schematic-replicator).
+/schematic-datastream-replicator
+/schematic-replicator
 
 # Test binary, built with `go test -c`
 *.test

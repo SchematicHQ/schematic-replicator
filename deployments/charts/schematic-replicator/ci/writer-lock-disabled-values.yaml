@@ -1,0 +1,10 @@
+# Read-only instance: takes no lease. Should render WRITER_LOCK_DISABLED=true
+# and emit the NOTES warning.
+schematic:
+  apiKey: ci-test-key
+redis:
+  addr: redis:6379
+writerLock:
+  disabled: true
+replay:
+  disabled: true
