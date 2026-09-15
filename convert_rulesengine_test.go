@@ -16,11 +16,8 @@ import (
 // fullyPopulatedCompany is a company with every JSON-tagged field set, including
 // the nested types the conversion round-trip has to carry: Rule with both
 // Conditions and ConditionGroups, Trait, FeatureEntitlement with WarningTiers,
-// CompanyMetric and Subscription.
-//
-// CreditPostpaid is deliberately left unset: schematic-go has no such field yet
-// (see the TODO on fromSDKCompany), so it is not part of what the round trip
-// promises to preserve.
+// CompanyMetric and Subscription, and CreditPostpaid (schematic-go v1.6.1 carries
+// it through the partial merge; SCH-7408).
 func fullyPopulatedCompany() *rulesengine.Company {
 	ts := time.Date(2026, 9, 14, 12, 30, 45, 123456789, time.UTC)
 	basePlanID := "plan-base"
@@ -31,6 +28,7 @@ func fullyPopulatedCompany() *rulesengine.Company {
 	monthReset := rulesengine.MetricPeriodMonthResetBilling
 	creditID := "credit-1"
 	consumptionRate := 2.5
+	overdraftLimit := 25.0
 	allocation := int64(500)
 	usage := int64(42)
 	softLimit := int64(450)
@@ -72,6 +70,10 @@ func fullyPopulatedCompany() *rulesengine.Company {
 		BasePlanID:        &basePlanID,
 		BillingProductIDs: rulesengine.JSONSlice[string]{"billing-1", "billing-2"},
 		CreditBalances:    map[string]float64{"credit-1": 10.5, "credit-2": 0},
+		CreditPostpaid: rulesengine.CreditPostpaidMap{
+			"credit-1": {OverdraftLimit: &overdraftLimit},
+			"credit-2": {},
+		},
 		Entitlements: rulesengine.JSONSlice[*rulesengine.FeatureEntitlement]{
 			{
 				Allocation:      &allocation,

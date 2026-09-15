@@ -7,7 +7,7 @@ require (
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/schematichq/rulesengine v0.1.25
 	github.com/schematichq/schematic-datastream-ws v0.2.10
-	github.com/schematichq/schematic-go v1.5.8
+	github.com/schematichq/schematic-go v1.6.1
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.46.0
