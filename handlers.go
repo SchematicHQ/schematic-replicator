@@ -261,11 +261,23 @@ func (h *ReplicatorMessageHandler) handleCompanyMessage(ctx context.Context, mes
 			h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial company '%s', skipping", id))
 			return nil
 		}
-		company, mergeErr := datastream.PartialCompany(existing, message.Data)
+		sdkExisting, convErr := toSDKCompany(existing)
+		if convErr != nil {
+			h.companyMu.Unlock()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company: %v", convErr))
+			return convErr
+		}
+		sdkCompany, mergeErr := datastream.PartialCompany(sdkExisting, message.Data)
 		if mergeErr != nil {
 			h.companyMu.Unlock()
 			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company: %v", mergeErr))
 			return mergeErr
+		}
+		company, convErr := fromSDKCompany(sdkCompany)
+		if convErr != nil {
+			h.companyMu.Unlock()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial company: %v", convErr))
+			return convErr
 		}
 		cacheResults := h.cacheCompanyForKeys(ctx, company)
 		h.companyMu.Unlock()
@@ -400,11 +412,23 @@ func (h *ReplicatorMessageHandler) handleUserMessage(ctx context.Context, messag
 			h.logger.Warn(ctx, fmt.Sprintf("Cache miss for partial user '%s', skipping", id))
 			return nil
 		}
-		user, mergeErr := datastream.PartialUser(existing, message.Data)
+		sdkExisting, convErr := toSDKUser(existing)
+		if convErr != nil {
+			h.userMu.Unlock()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user: %v", convErr))
+			return convErr
+		}
+		sdkUser, mergeErr := datastream.PartialUser(sdkExisting, message.Data)
 		if mergeErr != nil {
 			h.userMu.Unlock()
 			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user: %v", mergeErr))
 			return mergeErr
+		}
+		user, convErr := fromSDKUser(sdkUser)
+		if convErr != nil {
+			h.userMu.Unlock()
+			h.logger.Error(ctx, fmt.Sprintf("Failed to merge partial user: %v", convErr))
+			return convErr
 		}
 		cacheResults := h.cacheUserForKeys(ctx, user)
 		h.userMu.Unlock()
