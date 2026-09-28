@@ -500,8 +500,13 @@ func main() {
 	healthServer.Start()
 
 	// Enforce the single-writer contract: only one instance may consume the
-	// datastream and write this Redis. Wait briefly for a previous writer to
-	// release (rolling deploy / lease expiry) before giving up. Disable with
+	// datastream and write this Redis. Wait for a previous writer to release
+	// (rolling deploy / lease expiry) before giving up. The wait has to outlast
+	// a rolling deploy: the new task is health-checked and registered on the
+	// load balancer while it waits here, and the old task only releases the
+	// lock once it has been drained and stopped, which on ECS is a minute or
+	// two. WRITER_LOCK_ACQUIRE_TIMEOUT tunes it; a crashed holder's lease
+	// still expires after WRITER_LOCK_TTL, so a long wait is safe. Disable with
 	// WRITER_LOCK_DISABLED=true (e.g. for future read-only instances).
 	var writerLock *WriterLock
 	var lockLost chan struct{}
@@ -514,7 +519,13 @@ func main() {
 			}
 		}
 		writerLock = NewWriterLock(redisClient, logger, os.Getenv("WRITER_LOCK_KEY"), writerLockTTL)
-		if err := writerLock.Acquire(context.Background(), 2*writerLock.ttl); err != nil {
+		acquireTimeout := defaultWriterLockAcquireTimeout
+		if v := os.Getenv("WRITER_LOCK_ACQUIRE_TIMEOUT"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				acquireTimeout = d
+			}
+		}
+		if err := writerLock.Acquire(context.Background(), acquireTimeout); err != nil {
 			log.Fatalf("Could not acquire writer lock (another replicator instance may be running against this Redis): %v", err)
 		}
 		lockLost = make(chan struct{})

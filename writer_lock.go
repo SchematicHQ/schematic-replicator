@@ -22,6 +22,12 @@ import (
 const (
 	defaultWriterLockKey = "schematic:datastream:writer_lock"
 	defaultWriterLockTTL = 15 * time.Second
+	// defaultWriterLockAcquireTimeout is how long a starting instance waits for
+	// the previous writer to release before exiting. Long enough for a rolling
+	// deploy to drain and stop the old task (the health server is already up,
+	// so probes pass while waiting); a dead holder's lease expires after the
+	// TTL regardless.
+	defaultWriterLockAcquireTimeout = 5 * time.Minute
 	// renew at ttl/renewDivisor so a couple of refreshes can fail before expiry.
 	writerLockRenewDivisor = 3
 )

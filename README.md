@@ -149,6 +149,12 @@ strategy that stops the old instance before starting the new one (Kubernetes
   reintroduces the corruption it prevents.
 - `WRITER_LOCK_TTL`: Lease duration (default: `15s`). Renewed at TTL/3. Longer
   values tolerate more heartbeat failures but delay takeover after a crash.
+- `WRITER_LOCK_ACQUIRE_TIMEOUT`: How long a starting instance waits for the
+  previous writer to release the lease before exiting (default: `5m`). The
+  health server is already serving `/health` while it waits and `/ready`
+  reports not-ready, so a rolling deploy can register the new instance on the
+  load balancer, drain and stop the old one, and hand the lease over without a
+  window with no instance at all.
 - `WRITER_LOCK_KEY`: Redis key holding the lease (default:
   `schematic:datastream:writer_lock`). Change only to run independent replicators
   against separate keyspaces in one Redis.
