@@ -721,3 +721,72 @@ func TestConvertCompanyPreservesFlagCriticalFields(t *testing.T) {
 	assert.Contains(t, c.PlanIDs, "plan_base")
 	assert.Contains(t, c.PlanIDs, "plan_addon")
 }
+
+// Entitlements seeded from the REST API must carry every field the API sends.
+// SDKs read these entitlements from the cache, so a field the conversion drops
+// is missing for every company until a full datastream update replaces it.
+func TestConvertEntitlementsToRulesEngine_PreservesAllFields(t *testing.T) {
+	allocation := int64(500)
+	consumptionRate := 2.5
+	creditID := "credit-1"
+	creditRemaining := 10.5
+	creditReserved := 1.5
+	creditSettled := 12.0
+	creditTotal := 100.0
+	creditUsed := 89.5
+	eventName := "api_request"
+	eventSubtype := "api-request"
+	metricPeriod := schematicgo.MetricPeriodCurrentMonth
+	metricResetAt := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	monthReset := schematicgo.MetricPeriodMonthResetBillingCycle
+	softLimit := int64(450)
+	usage := int64(42)
+
+	apiEnt := &schematicgo.FeatureEntitlement{
+		Allocation:      &allocation,
+		ConsumptionRate: &consumptionRate,
+		CreditID:        &creditID,
+		CreditRemaining: &creditRemaining,
+		CreditReserved:  &creditReserved,
+		CreditSettled:   &creditSettled,
+		CreditTotal:     &creditTotal,
+		CreditUsed:      &creditUsed,
+		EventName:       &eventName,
+		EventSubtype:    &eventSubtype,
+		FeatureID:       "feat-1",
+		FeatureKey:      "api-requests",
+		MetricPeriod:    &metricPeriod,
+		MetricResetAt:   &metricResetAt,
+		MonthReset:      &monthReset,
+		SoftLimit:       &softLimit,
+		Usage:           &usage,
+		ValueType:       schematicgo.EntitlementValueTypeCredit,
+		WarningTiers:    []*schematicgo.WarningTier{{Key: "warn-80", Value: 400}},
+	}
+
+	converted := convertEntitlementsToRulesEngine([]*schematicgo.FeatureEntitlement{apiEnt})
+	require.Len(t, converted, 1)
+	ent := converted[0]
+
+	assert.Equal(t, &eventSubtype, ent.EventSubtype)
+	assert.Equal(t, &consumptionRate, ent.ConsumptionRate)
+	assert.Equal(t, &creditReserved, ent.CreditReserved)
+	assert.Equal(t, &creditSettled, ent.CreditSettled)
+	require.Len(t, ent.WarningTiers, 1)
+	assert.Equal(t, "warn-80", ent.WarningTiers[0].Key)
+	assert.Equal(t, int64(400), ent.WarningTiers[0].Value)
+
+	// Every field the API populated must survive the conversion, so a field
+	// added to the API type later can't be dropped silently.
+	apiJSON, err := json.Marshal(apiEnt)
+	require.NoError(t, err)
+	convertedJSON, err := json.Marshal(ent)
+	require.NoError(t, err)
+
+	var apiFields, convertedFields map[string]any
+	require.NoError(t, json.Unmarshal(apiJSON, &apiFields))
+	require.NoError(t, json.Unmarshal(convertedJSON, &convertedFields))
+	for field := range apiFields {
+		assert.Contains(t, convertedFields, field, "convertEntitlementsToRulesEngine drops %q", field)
+	}
+}
