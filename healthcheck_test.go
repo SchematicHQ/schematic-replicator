@@ -55,7 +55,7 @@ func TestRunHealthCheck(t *testing.T) {
 	})
 
 	t.Run("not-ready endpoint exits non-zero", func(t *testing.T) {
-		// /ready returns 503 until the datastream has loaded initial data.
+		// /ready returns 503 until the cache is complete for the current cache version.
 		startProbeTarget(t, http.StatusServiceUnavailable)
 		assert.Equal(t, 1, runHealthCheck("/ready"))
 	})

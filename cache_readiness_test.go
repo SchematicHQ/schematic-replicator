@@ -427,11 +427,39 @@ func newTestRedis(t *testing.T) redis.Cmdable {
 	return redis.NewClient(&redis.Options{Addr: mr.Addr()})
 }
 
+// assertEndpoints checks /health and /ready against the expected cache
+// readiness and connectivity. /health is always 200; /ready is 200 only when
+// the cache is ready. Both report real connectivity.
+func assertEndpoints(t *testing.T, hs *HealthServer, wantReady, wantConnected bool, msg string) {
+	t.Helper()
+	wantDatastream := ComponentStatusDisconnected
+	if wantConnected {
+		wantDatastream = ComponentStatusConnected
+	}
+
+	code, body := getHealth(t, hs, "/health")
+	assert.Equal(t, http.StatusOK, code, "/health is liveness: "+msg)
+	assert.Equal(t, wantReady, body.Ready, "/health ready: "+msg)
+	assert.Equal(t, wantConnected, body.Connected, "/health connected: "+msg)
+	assert.Equal(t, wantDatastream, body.Components["datastream"], "/health datastream: "+msg)
+	assert.Equal(t, rulesengine.GetVersionKey(), body.CacheVersion)
+
+	wantCode := http.StatusServiceUnavailable
+	if wantReady {
+		wantCode = http.StatusOK
+	}
+	code, body = getHealth(t, hs, "/ready")
+	assert.Equal(t, wantCode, code, "/ready status: "+msg)
+	assert.Equal(t, wantReady, body.Ready, "/ready ready: "+msg)
+	assert.Equal(t, wantConnected, body.Connected, "/ready connected: "+msg)
+	assert.Equal(t, wantDatastream, body.Components["datastream"], "/ready datastream: "+msg)
+}
+
 // On the async path the datastream client reports ready as soon as
 // OnConnectionReady returns, while companies and users are still loading in the
-// background. /health must wait for the load; once complete it must stay ready
-// through a disconnect that never recovers, and a restarted replicator that
-// can't reach Schematic must report the complete cache ready.
+// background. /health and /ready must wait for the load; once complete they
+// must stay ready through a disconnect that never recovers, and a restarted
+// replicator that can't reach Schematic must report the complete cache ready.
 func TestHealthReadyAsyncColdStartDisconnectAndRestart(t *testing.T) {
 	fake := newFakeSchematic(t)
 	rc := newTestRedis(t)
@@ -444,82 +472,81 @@ func TestHealthReadyAsyncColdStartDisconnectAndRestart(t *testing.T) {
 	require.Eventually(t, rut.ds.IsReady, 2*time.Second, 10*time.Millisecond, "datastream client should be ready once subscribed")
 	// Give the flags snapshot time to land so only the company load is pending.
 	time.Sleep(100 * time.Millisecond)
-	code, body := getHealth(t, rut.health, "/health")
-	assert.Equal(t, http.StatusOK, code)
-	assert.False(t, body.Ready, "companies are still loading, so the cache is not servable")
-	assert.True(t, body.Connected)
+	assertEndpoints(t, rut.health, false, true, "companies are still loading, so the cache is not servable")
 
 	close(release)
 	require.Eventually(t, rut.readiness.IsReady, 2*time.Second, 10*time.Millisecond)
-	_, body = getHealth(t, rut.health, "/health")
-	assert.True(t, body.Ready)
-	assert.Equal(t, rulesengine.GetVersionKey(), body.CacheVersion)
+	assertEndpoints(t, rut.health, true, true, "load complete")
 
 	// Schematic becomes unreachable for good.
 	fake.goDown()
 	require.Eventually(t, func() bool { return !rut.ds.IsConnected() }, 2*time.Second, 10*time.Millisecond)
-	code, body = getHealth(t, rut.health, "/health")
-	assert.Equal(t, http.StatusOK, code)
-	assert.True(t, body.Ready, "a disconnect leaves the cache populated and servable")
-	assert.False(t, body.Connected)
-	assert.Equal(t, ComponentStatusDisconnected, body.Components["datastream"])
-
-	// /ready keeps its datastream-connectivity semantics.
-	code, body = getHealth(t, rut.health, "/ready")
-	assert.Equal(t, http.StatusServiceUnavailable, code)
-	assert.False(t, body.Ready)
+	assertEndpoints(t, rut.health, true, false, "a disconnect leaves the cache populated and servable")
 
 	// Restart against the same Redis with Schematic still down.
 	rut.stop()
 	restarted := startReplicatorUnderTest(t, fake, rc, true, nil)
-	code, body = getHealth(t, restarted.health, "/health")
-	assert.Equal(t, http.StatusOK, code)
-	assert.True(t, body.Ready, "the persisted marker vouches for the cache across a restart")
-	assert.False(t, body.Connected)
-	code, _ = getHealth(t, restarted.health, "/ready")
-	assert.Equal(t, http.StatusServiceUnavailable, code)
+	assertEndpoints(t, restarted.health, true, false, "the persisted marker vouches for the cache across a restart")
 }
 
-// On the sync path /health becomes ready only after the company/user load and
-// the flags snapshot, and stays ready after a disconnect.
+// On the sync path the endpoints become ready only after the company/user load
+// and the flags snapshot, and stay ready after a disconnect.
 func TestHealthReadySyncColdStartAndDisconnect(t *testing.T) {
 	fake := newFakeSchematic(t)
 	rut := startReplicatorUnderTest(t, fake, newTestRedis(t), false, nil)
 
 	require.Eventually(t, rut.ds.IsConnected, 2*time.Second, 10*time.Millisecond)
-	_, body := getHealth(t, rut.health, "/health")
-	assert.False(t, body.Ready, "the sync load is still waiting on the API")
+	assertEndpoints(t, rut.health, false, true, "the sync load is still waiting on the API")
 
 	close(fake.releaseAPI)
 	require.Eventually(t, rut.readiness.IsReady, 2*time.Second, 10*time.Millisecond)
-	_, body = getHealth(t, rut.health, "/health")
-	assert.True(t, body.Ready)
+	assertEndpoints(t, rut.health, true, true, "load complete")
 
 	fake.goDown()
 	require.Eventually(t, func() bool { return !rut.ds.IsConnected() }, 2*time.Second, 10*time.Millisecond)
-	_, body = getHealth(t, rut.health, "/health")
-	assert.True(t, body.Ready)
-	assert.False(t, body.Connected)
+	assertEndpoints(t, rut.health, true, false, "disconnected with a complete cache")
 }
 
-// Before the datastream client exists (waiting on the writer lock), /health
-// reports the persisted readiness and /ready stays not-ready.
+// Before the datastream client exists (waiting on the writer lock during a
+// rolling deploy), both endpoints report the persisted readiness, so the
+// orchestrator can stop the old instance and the lease hands over.
 func TestHealthReadyBeforeDatastreamClient(t *testing.T) {
 	ctx := context.Background()
-	r, _, client := newTestReadiness(t, rulesengine.VersionKey)
-	require.NoError(t, client.Set(ctx, defaultLoadCompleteKey, rulesengine.VersionKey, 0).Err())
-	r.Load(ctx)
 
-	hs := NewHealthServer(0, nil, client, NewSchematicLogger())
-	hs.SetCacheReadiness(r)
+	for _, tt := range []struct {
+		name   string
+		marker string
+		ready  bool
+	}{
+		{"warm cache", rulesengine.VersionKey, true},
+		{"cold cache", "", false},
+		{"marker from another cache version", "other-version", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _, client := newTestReadiness(t, rulesengine.VersionKey)
+			if tt.marker != "" {
+				require.NoError(t, client.Set(ctx, defaultLoadCompleteKey, tt.marker, 0).Err())
+			}
+			r.Load(ctx)
 
-	code, body := getHealth(t, hs, "/health")
-	assert.Equal(t, http.StatusOK, code)
-	assert.True(t, body.Ready)
-	assert.False(t, body.Connected)
-	assert.Equal(t, ComponentStatusUnknown, body.Components["datastream"])
+			hs := NewHealthServer(0, nil, client, NewSchematicLogger())
+			hs.SetCacheReadiness(r)
 
-	code, body = getHealth(t, hs, "/ready")
-	assert.Equal(t, http.StatusServiceUnavailable, code)
-	assert.False(t, body.Ready)
+			code, body := getHealth(t, hs, "/health")
+			assert.Equal(t, http.StatusOK, code)
+			assert.Equal(t, tt.ready, body.Ready)
+			assert.False(t, body.Connected)
+			assert.Equal(t, ComponentStatusUnknown, body.Components["datastream"])
+
+			wantCode := http.StatusServiceUnavailable
+			if tt.ready {
+				wantCode = http.StatusOK
+			}
+			code, body = getHealth(t, hs, "/ready")
+			assert.Equal(t, wantCode, code)
+			assert.Equal(t, tt.ready, body.Ready)
+			assert.False(t, body.Connected)
+			assert.Equal(t, ComponentStatusUnknown, body.Components["datastream"])
+		})
+	}
 }

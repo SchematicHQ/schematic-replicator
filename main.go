@@ -82,8 +82,8 @@ type HealthServer struct {
 	server           *http.Server
 	mu               sync.RWMutex
 
-	// Cache readiness reported as `ready` on /health (optional; nil reports not
-	// ready).
+	// Cache readiness reported as `ready` on /health and /ready (optional; nil
+	// reports not ready).
 	cacheReadiness *CacheReadiness
 
 	// Replay introspection (optional; populated once replay components exist).
@@ -112,12 +112,9 @@ const (
 type ComponentStatusType string
 
 const (
-	ComponentStatusConnected        ComponentStatusType = "connected"
-	ComponentStatusDisconnected     ComponentStatusType = "disconnected"
-	ComponentStatusReady            ComponentStatusType = "ready"
-	ComponentStatusConnectedLoading ComponentStatusType = "connected_loading"
-	ComponentStatusNotReady         ComponentStatusType = "not_ready"
-	ComponentStatusUnknown          ComponentStatusType = "unknown"
+	ComponentStatusConnected    ComponentStatusType = "connected"
+	ComponentStatusDisconnected ComponentStatusType = "disconnected"
+	ComponentStatusUnknown      ComponentStatusType = "unknown"
 )
 
 // HealthStatus represents the health status response
@@ -153,15 +150,16 @@ func NewHealthServer(port int, datastreamClient *schematicdatastreamws.Client, r
 
 // SetDatastreamClient attaches the datastream client once it exists. The server
 // can be started before this (e.g. while waiting to acquire the writer lock):
-// until the client is set, /health reports alive and /ready reports not-ready.
+// until the client is set, both endpoints report `connected: false`, and `ready`
+// reflects the persisted cache readiness.
 func (hs *HealthServer) SetDatastreamClient(client *schematicdatastreamws.Client) {
 	hs.mu.Lock()
 	hs.datastreamClient = client
 	hs.mu.Unlock()
 }
 
-// SetCacheReadiness attaches the tracker whose state /health reports as
-// `ready`.
+// SetCacheReadiness attaches the tracker whose state /health and /ready report
+// as `ready`.
 func (hs *HealthServer) SetCacheReadiness(readiness *CacheReadiness) {
 	hs.mu.Lock()
 	hs.cacheReadiness = readiness
@@ -249,12 +247,11 @@ func (hs *HealthServer) Stop() {
 	}
 }
 
-// healthHandler handles the /health endpoint (liveness probe)
-// Returns healthy if the process is alive and Redis is connected. `ready` means
-// the cache is complete and servable for cache_version, which is what SDKs in
+// currentStatus builds the body shared by /health and /ready. `ready` means the
+// cache is complete and servable for cache_version, which is what SDKs in
 // replicator mode gate on; it stays true while the datastream is disconnected.
 // `connected` and components.datastream report actual connectivity.
-func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+func (hs *HealthServer) currentStatus() HealthStatus {
 	hs.mu.RLock()
 	defer hs.mu.RUnlock()
 
@@ -281,62 +278,39 @@ func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Liveness check: Process is healthy if Redis is working
-	// Datastream connectivity issues don't make the process unhealthy (it can retry)
-	w.WriteHeader(http.StatusOK)
+	return status
+}
+
+// writeStatus encodes a health body with the given HTTP status code.
+func (hs *HealthServer) writeStatus(w http.ResponseWriter, code int, status HealthStatus) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(status); err != nil {
 		hs.logger.Error(context.Background(), fmt.Sprintf("Failed to encode health status: %v", err))
 	}
 }
 
+// healthHandler handles the /health endpoint (liveness probe)
+// Always returns 200 while the process is alive: datastream connectivity issues
+// don't make the process unhealthy (it can retry), and an incomplete cache is
+// reported through `ready` rather than the status code.
+func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+	hs.writeStatus(w, http.StatusOK, hs.currentStatus())
+}
+
 // readinessHandler handles the /ready endpoint (readiness probe)
-// Returns ready only when connected to datastream and initial data is loaded
+// Returns 200 once the cache is complete and servable for the current cache
+// version, including while the datastream is disconnected, and 503 before that.
+// Nothing routes traffic through the replicator (SDKs read Redis directly), so
+// the probe's practical effect is whether SDKs can reach this endpoint, which we
+// want whenever the cache is servable.
 func (hs *HealthServer) readinessHandler(w http.ResponseWriter, r *http.Request) {
-	hs.mu.RLock()
-	defer hs.mu.RUnlock()
-
-	ready := false
-	connected := false
-
-	if hs.datastreamClient != nil {
-		connected = hs.datastreamClient.IsConnected()
-		ready = hs.datastreamClient.IsReady()
+	status := hs.currentStatus()
+	code := http.StatusOK
+	if !status.Ready {
+		code = http.StatusServiceUnavailable
 	}
-
-	status := HealthStatus{
-		Status:    HealthStatusHealthy, // Will be updated based on readiness
-		Ready:     ready,
-		Connected: connected,
-		Components: map[string]ComponentStatusType{
-			"redis":      ComponentStatusConnected,
-			"datastream": ComponentStatusNotReady,
-		},
-		CacheVersion: rulesengine.GetVersionKey(),
-		Timestamp:    time.Now(),
-	}
-
-	if ready {
-		// Fully ready: connected and initial data loaded
-		status.Status = HealthStatusHealthy
-		status.Components["datastream"] = ComponentStatusReady
-		w.WriteHeader(http.StatusOK)
-	} else if connected {
-		// Connected but still loading initial data
-		status.Status = HealthStatusHealthy // Still healthy, just not ready yet
-		status.Components["datastream"] = ComponentStatusConnectedLoading
-		w.WriteHeader(http.StatusServiceUnavailable)
-	} else {
-		// Not connected at all
-		status.Status = HealthStatusHealthy // Health endpoint should still return healthy
-		status.Components["datastream"] = ComponentStatusDisconnected
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(status); err != nil {
-		hs.logger.Error(context.Background(), fmt.Sprintf("Failed to encode readiness status: %v", err))
-	}
+	hs.writeStatus(w, code, status)
 }
 
 // healthPortFromEnv reads the health server port, falling back to the default
@@ -509,14 +483,16 @@ func main() {
 	// Cache readiness is keyed by the rules engine version: a load-complete
 	// marker left by a build with another version doesn't count. Reading it now,
 	// before the writer lock, lets an instance waiting on a rolling deploy report
-	// the cache the previous writer keeps complete.
+	// ready on the cache the previous writer keeps complete, so the orchestrator
+	// can stop the old instance and the lease hands over.
 	cacheReadiness := NewCacheReadiness(redisClient, logger, rulesengine.VersionKey, cacheTTL)
 	cacheReadiness.Load(context.Background())
 
 	// Start the health server before acquiring the writer lock so probes get a
 	// response during a contended startup wait (rolling deploy / lease expiry):
-	// /health reports alive and /ready reports not-ready until setup completes.
-	// The datastream client is attached later via SetDatastreamClient.
+	// /health reports alive, and /ready reports ready only if the cache is
+	// already complete for this cache version. The datastream client is attached
+	// later via SetDatastreamClient.
 	healthServer := NewHealthServer(healthPort, nil, redisClient, logger)
 	healthServer.SetCacheReadiness(cacheReadiness)
 	healthServer.Start()

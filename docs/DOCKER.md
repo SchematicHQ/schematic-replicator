@@ -275,7 +275,7 @@ The application provides HTTP endpoints for health monitoring:
 ### Available Endpoints
 
 - **`GET /health`** - Liveness probe (is the application running?)
-- **`GET /ready`** - Readiness probe (is the application ready to serve traffic?)
+- **`GET /ready`** - Readiness probe (is the Redis cache complete and servable? 200 once the initial load has finished for the current cache version, including while disconnected from Schematic; 503 before that)
 
 ### Manual Health Checks
 
@@ -376,9 +376,10 @@ docker run -d \
 **Single-writer constraint**: exactly one replicator instance may write a given
 Redis. Instances acquire a Redis lease at startup and **exit** if another holds
 it, so `replicas` must be `1` and the rollout strategy must be `Recreate`. The
-default `RollingUpdate` strategy deadlocks: the new pod starts while the old
-still holds the lease, the new pod never becomes ready, and the old pod is never
-terminated. To run additional read-only instances, set `WRITER_LOCK_DISABLED=true`
+default `RollingUpdate` strategy can deadlock: the new pod starts while the old
+still holds the lease, and it reports ready only if the cache is already
+complete for its cache version. On a cold cache or after a cache version change
+it never becomes ready, and the old pod is never terminated. To run additional read-only instances, set `WRITER_LOCK_DISABLED=true`
 on those (they must not write the cache).
 
 ```yaml
