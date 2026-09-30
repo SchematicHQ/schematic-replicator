@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/alicebob/miniredis/v2 v2.39.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/schematichq/rulesengine v0.1.25
 	github.com/schematichq/schematic-datastream-ws v0.2.10
@@ -23,7 +24,6 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect

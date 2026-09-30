@@ -523,6 +523,7 @@ type ConnectionReadyHandler struct {
 	flagsCache         CacheProvider[*rulesengine.Flag]
 	logger             *SchematicLogger
 	cacheTTL           time.Duration
+	readiness          *CacheReadiness // optional; told when the company/user load completes
 }
 
 // NewConnectionReadyHandler creates a new connection ready handler with synchronous loading
@@ -556,6 +557,11 @@ func (h *ConnectionReadyHandler) SetWebSocketClient(wsClient *schematicdatastrea
 	h.wsClient = wsClient
 }
 
+// SetCacheReadiness injects the tracker told when the company/user load completes.
+func (h *ConnectionReadyHandler) SetCacheReadiness(readiness *CacheReadiness) {
+	h.readiness = readiness
+}
+
 // OnConnectionReady implements the ConnectionReadyHandler interface for synchronous loading
 func (h *ConnectionReadyHandler) OnConnectionReady(ctx context.Context) error {
 	// Synchronous mode: wait for all data to load before completing
@@ -570,6 +576,7 @@ func (h *ConnectionReadyHandler) OnConnectionReady(ctx context.Context) error {
 	if err := h.loadAndCacheUsers(ctx); err != nil {
 		return fmt.Errorf("failed to load users: %w", err)
 	}
+	h.readiness.MarkEntitiesLoaded(ctx)
 
 	// 3. Subscribe to company and user updates via websocket
 	if err := h.subscribeToUpdates(ctx); err != nil {

@@ -82,6 +82,10 @@ type HealthServer struct {
 	server           *http.Server
 	mu               sync.RWMutex
 
+	// Cache readiness reported as `ready` on /health (optional; nil reports not
+	// ready).
+	cacheReadiness *CacheReadiness
+
 	// Replay introspection (optional; populated once replay components exist).
 	replayCursor *ReplayCursor
 	replayStats  *ReplayStats
@@ -153,6 +157,14 @@ func NewHealthServer(port int, datastreamClient *schematicdatastreamws.Client, r
 func (hs *HealthServer) SetDatastreamClient(client *schematicdatastreamws.Client) {
 	hs.mu.Lock()
 	hs.datastreamClient = client
+	hs.mu.Unlock()
+}
+
+// SetCacheReadiness attaches the tracker whose state /health reports as
+// `ready`.
+func (hs *HealthServer) SetCacheReadiness(readiness *CacheReadiness) {
+	hs.mu.Lock()
+	hs.cacheReadiness = readiness
 	hs.mu.Unlock()
 }
 
@@ -238,14 +250,17 @@ func (hs *HealthServer) Stop() {
 }
 
 // healthHandler handles the /health endpoint (liveness probe)
-// Returns healthy if the process is alive and Redis is connected
+// Returns healthy if the process is alive and Redis is connected. `ready` means
+// the cache is complete and servable for cache_version, which is what SDKs in
+// replicator mode gate on; it stays true while the datastream is disconnected.
+// `connected` and components.datastream report actual connectivity.
 func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	hs.mu.RLock()
 	defer hs.mu.RUnlock()
 
 	status := HealthStatus{
 		Status:    HealthStatusHealthy,
-		Ready:     false,
+		Ready:     hs.cacheReadiness.IsReady(),
 		Connected: false,
 		Components: map[string]ComponentStatusType{
 			"redis":      ComponentStatusConnected, // Redis is assumed healthy if we got this far (connection tested at startup)
@@ -258,7 +273,6 @@ func (hs *HealthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	// Check datastream connection (for informational purposes)
 	if hs.datastreamClient != nil {
 		status.Connected = hs.datastreamClient.IsConnected()
-		status.Ready = hs.datastreamClient.IsReady()
 
 		if status.Connected {
 			status.Components["datastream"] = ComponentStatusConnected
@@ -492,11 +506,19 @@ func main() {
 		log.Fatalf("Redis connection failed: %v", err)
 	}
 
+	// Cache readiness is keyed by the rules engine version: a load-complete
+	// marker left by a build with another version doesn't count. Reading it now,
+	// before the writer lock, lets an instance waiting on a rolling deploy report
+	// the cache the previous writer keeps complete.
+	cacheReadiness := NewCacheReadiness(redisClient, logger, rulesengine.VersionKey, cacheTTL)
+	cacheReadiness.Load(context.Background())
+
 	// Start the health server before acquiring the writer lock so probes get a
 	// response during a contended startup wait (rolling deploy / lease expiry):
 	// /health reports alive and /ready reports not-ready until setup completes.
 	// The datastream client is attached later via SetDatastreamClient.
 	healthServer := NewHealthServer(healthPort, nil, redisClient, logger)
+	healthServer.SetCacheReadiness(cacheReadiness)
 	healthServer.Start()
 
 	// Enforce the single-writer contract: only one instance may consume the
@@ -707,8 +729,14 @@ func main() {
 	} else {
 		replayCursor = NewReplayCursor(redisClient, logger, os.Getenv("REPLAY_CURSOR_KEY"))
 		replayCursor.Load(context.Background())
+		// Re-read the marker now that we hold the writer lock (the previous
+		// writer may have finished a load while we waited), then drop a cursor
+		// that the marker doesn't vouch for.
+		cacheReadiness.Load(context.Background())
+		discardUnvouchedReplayCursor(context.Background(), replayCursor, cacheReadiness, logger)
 		messageHandler.SetReplayCursor(replayCursor)
 	}
+	messageHandler.SetCacheReadiness(cacheReadiness)
 
 	// Create connection ready handler (wsClient will be set later)
 	var connectionReadyHandlerFunc schematicdatastreamws.ConnectionReadyHandlerFunc
@@ -721,6 +749,7 @@ func main() {
 			asyncLoaderConfig.MaxConcurrentRequests, asyncLoaderConfig.RateLimitRPS))
 		asyncHandler = NewAsyncConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL, asyncLoaderConfig)
 		asyncHandler.SetStats(replayStats)
+		asyncHandler.SetCacheReadiness(cacheReadiness)
 		if replayCursor != nil {
 			asyncHandler.SetReplayCursor(replayCursor)
 			messageHandler.SetReloadFunc(asyncHandler.TriggerReload)
@@ -735,6 +764,7 @@ func main() {
 	} else {
 		logger.Info(context.Background(), "Using synchronous initial loading (USE_ASYNC_LOADING=false); replay is disabled on this path")
 		syncHandler = NewConnectionReadyHandler(schematicClient, nil, companiesCache, usersCache, featuresCache, companyLookupCache, userLookupCache, logger, cacheTTL)
+		syncHandler.SetCacheReadiness(cacheReadiness)
 		connectionReadyHandlerFunc = syncHandler.OnConnectionReady
 	}
 

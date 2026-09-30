@@ -29,6 +29,45 @@ curl http://localhost:8090/health
 For detailed development setup, see [docs/DEV-README.md](docs/DEV-README.md).
 For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 
+## Health Endpoints
+
+The health server (`HEALTH_PORT`, default `8090`) serves two endpoints with the
+same JSON shape:
+
+```json
+{
+  "status": "healthy",
+  "ready": true,
+  "connected": false,
+  "components": { "redis": "connected", "datastream": "disconnected" },
+  "cache_version": "a1b2c3d4",
+  "timestamp": "2026-09-30T10:00:00Z"
+}
+```
+
+- `GET /health` always returns 200 while the process is up. Its `ready` field
+  means the Redis cache is complete and servable for `cache_version`, which is
+  what SDKs in replicator mode gate on. It becomes true once the initial load
+  (flags, companies and users) has finished for the current cache version, and
+  it stays true after the datastream disconnects, including permanently (an
+  outage, a revoked API key, reconnect attempts exhausted), because the cache
+  is still populated. A reload keeps it true for the same reason. `connected`
+  and `components.datastream` report actual datastream connectivity, so a
+  disconnect is still visible.
+- `GET /ready` is the orchestrator readiness probe. It returns 200 with
+  `ready: true` only while the datastream is connected and its connection
+  setup has completed, and 503 otherwise.
+
+Completion is persisted in Redis at `schematic:datastream:load_complete`, with
+the cache version as its value and the same TTL as the cache entries. A
+restarted replicator that finds a marker for its own cache version reports
+`ready` before it reaches Schematic, so it keeps vouching for a warm cache
+during an outage. A marker from a build with a different cache version doesn't
+count: that build reads a different key space, so it waits for a fresh initial
+load. A persisted replay cursor is only used to skip the initial load when the
+marker vouches for the cache; otherwise the cursor is discarded and the
+replicator does a full load.
+
 ## Environment Variables
 
 ### Required
@@ -371,7 +410,7 @@ client := schematic.NewClient(
     core.WithAPIKey("your-api-key"),
     core.WithDatastream(
         core.WithReplicatorMode(),
-        core.WithReplicatorHealthURL("http://my-replicator:8090/ready"),
+        core.WithReplicatorHealthURL("http://my-replicator:8090/health"),
         core.WithReplicatorHealthInterval(60*time.Second),
     ),
 )
@@ -379,7 +418,10 @@ client := schematic.NewClient(
 
 ##### Default Configuration
 
-- **Replicator Health URL**: `http://localhost:8090/ready`
+- **Replicator Health URL**: `http://localhost:8090/ready`. Point it at
+  `/health` instead, as in the example above: `/health` keeps reporting `ready`
+  while the replicator is disconnected from Schematic with a complete cache,
+  and `/ready` does not (see [Health Endpoints](#health-endpoints)).
 - **Health Check Interval**: 30 seconds
 - **Cache TTL**: 24 hours (handled automatically by the replicator)
 
