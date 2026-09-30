@@ -29,6 +29,49 @@ curl http://localhost:8090/health
 For detailed development setup, see [docs/DEV-README.md](docs/DEV-README.md).
 For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
 
+## Health Endpoints
+
+The health server (`HEALTH_PORT`, default `8090`) serves two endpoints with the
+same JSON shape:
+
+```json
+{
+  "status": "healthy",
+  "ready": true,
+  "connected": false,
+  "components": { "redis": "connected", "datastream": "disconnected" },
+  "cache_version": "a1b2c3d4",
+  "timestamp": "2026-09-30T10:00:00Z"
+}
+```
+
+Both report `ready` the same way: the Redis cache is complete and servable for
+`cache_version`, which is what SDKs in replicator mode gate on. `ready` becomes
+true once the initial load (flags, companies and users) has finished for the
+current cache version, and it stays true after the datastream disconnects,
+including permanently (an outage, a revoked API key, reconnect attempts
+exhausted), because the cache is still populated. A reload keeps it true for
+the same reason. `connected` and `components.datastream` report actual
+datastream connectivity on both endpoints, so a disconnect is still visible.
+
+- `GET /ready` returns 200 when `ready` is true and 503 before that. SDKs poll it
+  by default, and it is the orchestrator readiness probe. Nothing routes
+  traffic through the replicator (SDKs read Redis directly), so readiness only
+  decides whether SDKs can reach this endpoint, which should hold whenever the
+  cache is servable.
+- `GET /health` is the liveness check. It always returns 200 while the process
+  is up, whatever the cache or datastream state.
+
+Completion is persisted in Redis at `schematic:datastream:load_complete`, with
+the cache version as its value and the same TTL as the cache entries. A
+restarted replicator that finds a marker for its own cache version reports
+`ready` before it reaches Schematic, so it keeps vouching for a warm cache
+during an outage. A marker from a build with a different cache version doesn't
+count: that build reads a different key space, so it waits for a fresh initial
+load. A persisted replay cursor is only used to skip the initial load when the
+marker vouches for the cache; otherwise the cursor is discarded and the
+replicator does a full load.
+
 ## Environment Variables
 
 ### Required
@@ -151,10 +194,12 @@ strategy that stops the old instance before starting the new one (Kubernetes
   values tolerate more heartbeat failures but delay takeover after a crash.
 - `WRITER_LOCK_ACQUIRE_TIMEOUT`: How long a starting instance waits for the
   previous writer to release the lease before exiting (default: `5m`). The
-  health server is already serving `/health` while it waits and `/ready`
-  reports not-ready, so a rolling deploy can register the new instance on the
-  load balancer, drain and stop the old one, and hand the lease over without a
-  window with no instance at all.
+  health server is already serving while it waits: `/health` reports alive, and
+  `/ready` reports ready when the previous writer's cache is complete for this
+  build's cache version. So a rolling deploy can register the new instance on
+  the load balancer, drain and stop the old one, and hand the lease over without
+  a window with no instance at all. If the cache version changed, the waiting
+  instance is not ready until it has done its own initial load.
 - `WRITER_LOCK_KEY`: Redis key holding the lease (default:
   `schematic:datastream:writer_lock`). Change only to run independent replicators
   against separate keyspaces in one Redis.
@@ -379,7 +424,9 @@ client := schematic.NewClient(
 
 ##### Default Configuration
 
-- **Replicator Health URL**: `http://localhost:8090/ready`
+- **Replicator Health URL**: `http://localhost:8090/ready`, which reports ready
+  whenever the cache is complete, including while the replicator is
+  disconnected from Schematic (see [Health Endpoints](#health-endpoints)).
 - **Health Check Interval**: 30 seconds
 - **Cache TTL**: 24 hours (handled automatically by the replicator)
 

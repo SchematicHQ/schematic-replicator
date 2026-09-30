@@ -161,12 +161,19 @@ type AsyncReplicatorMessageHandler struct {
 	// Replay support (optional; nil when replay is disabled)
 	replayCursor *ReplayCursor
 	reloadFunc   func(ctx context.Context)
+	readiness    *CacheReadiness // optional; told when a bulk flags snapshot lands
 }
 
 // SetReplayCursor injects the cursor the handler records each message's stream
 // ID into, so a reconnect can replay from the last processed message.
 func (h *AsyncReplicatorMessageHandler) SetReplayCursor(cursor *ReplayCursor) {
 	h.replayCursor = cursor
+}
+
+// SetCacheReadiness wires the tracker told when a bulk flags snapshot has been
+// applied, one half of the initial load.
+func (h *AsyncReplicatorMessageHandler) SetCacheReadiness(readiness *CacheReadiness) {
+	h.readiness = readiness
 }
 
 // SetReloadFunc wires the action taken when the server signals that the replay
@@ -1389,11 +1396,13 @@ func (h *AsyncReplicatorMessageHandler) processBulkFlagsMessage(ctx context.Cont
 		defer h.flagsMu.Unlock()
 
 		var cacheKeys []string
+		setFailed := false
 		for _, flag := range flags {
 			if flag != nil && flag.Key != "" {
 				cacheKey := flagCacheKey(flag.Key)
 				if err := h.flagsCache.Set(ctx, cacheKey, flag, h.cacheTTL); err != nil {
 					h.logger.Error(ctx, fmt.Sprintf("Failed to cache flag %s: %v", flag.Key, err))
+					setFailed = true
 				} else {
 					h.logger.Debug(ctx, fmt.Sprintf("Cached flag: %s", flag.Key))
 					cacheKeys = append(cacheKeys, cacheKey)
@@ -1409,6 +1418,11 @@ func (h *AsyncReplicatorMessageHandler) processBulkFlagsMessage(ctx context.Cont
 		}
 
 		h.logger.Info(ctx, fmt.Sprintf("Successfully cached %d flags", len(flags)))
+
+		// Only a snapshot that fully landed counts toward the initial load.
+		if !setFailed {
+			h.readiness.MarkFlagsLoaded(ctx)
+		}
 
 	default:
 		h.logger.Debug(ctx, fmt.Sprintf("Unhandled bulk flags message type: %s", message.MessageType))
@@ -1509,6 +1523,10 @@ type AsyncInitialLoader struct {
 	// API-backed loaders in NewAsyncInitialLoader.
 	loadCompaniesFn func(ctx context.Context) error
 	loadUsersFn     func(ctx context.Context) error
+
+	// readiness is told when a run loads both companies and users successfully.
+	// Optional.
+	readiness *CacheReadiness
 
 	// Metrics
 	companiesLoadTime time.Duration
@@ -1769,10 +1787,20 @@ func (al *AsyncInitialLoader) runLoad(ctx context.Context) {
 		}
 	}()
 
-	// Clear the in-progress flag once both loads finish so a later reload can run.
+	// Once both loads finish, record a successful run as the company/user half
+	// of the initial load, then clear the in-progress flag so a later reload can
+	// run. A failed run leaves readiness as it was: a cold cache stays not
+	// ready, and a reload failure leaves the previous, still populated cache
+	// ready.
 	go func() {
 		<-companiesChan
 		<-usersChan
+		al.loadingMu.RLock()
+		succeeded := al.companiesLoadError == nil && al.usersLoadError == nil
+		al.loadingMu.RUnlock()
+		if succeeded {
+			al.readiness.MarkEntitiesLoaded(ctx)
+		}
 		al.loadingMu.Lock()
 		al.loadingInProgress = false
 		al.loadingMu.Unlock()
@@ -2245,6 +2273,12 @@ func (h *AsyncConnectionReadyHandler) SetStats(stats *ReplayStats) {
 	h.stats = stats
 }
 
+// SetCacheReadiness injects the tracker told when the async company/user load
+// completes.
+func (h *AsyncConnectionReadyHandler) SetCacheReadiness(readiness *CacheReadiness) {
+	h.asyncLoader.readiness = readiness
+}
+
 // replayFrom returns the resume token to attach to subscribe requests, or nil
 // when there is no cursor yet (fresh start → full load).
 func (h *AsyncConnectionReadyHandler) replayFrom() *string {
@@ -2308,13 +2342,14 @@ func (h *AsyncConnectionReadyHandler) OnConnectionReady(ctx context.Context) err
 	h.stats.IncConnections()
 
 	// If we already have a committed cursor, resume via replay instead of doing
-	// a full bulk load. The cursor and the cache live in the same Redis, so a
-	// present cursor means the cache is warm to that position; replay (below)
-	// catches up the rest. If the cursor has aged out of the server's retention
-	// window, the server answers the replay request with MessageTypeReload and we
-	// fall back to a full reload. This avoids a redundant API-read-replica storm
-	// on every process restart while the cache is already warm. (On a fresh start
-	// with no cursor, do the full bulk load.)
+	// a full bulk load. The cursor and the cache live in the same Redis, and main
+	// discards a cursor that has no load-complete marker for the current cache
+	// version, so a present cursor means the cache is warm to that position;
+	// replay (below) catches up the rest. If the cursor has aged out of the
+	// server's retention window, the server answers the replay request with
+	// MessageTypeReload and we fall back to a full reload. This avoids a
+	// redundant API-read-replica storm on every process restart while the cache
+	// is already warm. (On a fresh start with no cursor, do the full bulk load.)
 	if h.replayCursor != nil && h.replayCursor.Get() != "" {
 		h.logger.Info(ctx, "Resuming from persisted replay cursor; skipping initial bulk load")
 		h.asyncLoader.MarkStarted()
