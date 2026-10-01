@@ -21,8 +21,6 @@ jobs:
     runs-on: runs-on=${{ github.run_id }}/runner=4cpu-linux-arm64
     permissions:
       contents: read
-      id-token: write # For signing and attestations
-      attestations: write # For build provenance
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       metadata: ${{ steps.meta.outputs.json }}
@@ -89,8 +87,6 @@ jobs:
     runs-on: runs-on=${{ github.run_id }}/runner=2cpu-linux-x64
     permissions:
       contents: read
-      id-token: write
-      attestations: write
 
     steps:
       - name: Checkout repo
@@ -145,7 +141,6 @@ jobs:
     permissions:
       contents: read
       id-token: write # Required for OIDC
-      attestations: write
 
     steps:
       - name: Checkout repo

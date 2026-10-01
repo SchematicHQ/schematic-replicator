@@ -73,11 +73,11 @@ LABEL \
     org.opencontainers.image.title="Schematic Datastream Replicator" \
     org.opencontainers.image.description="High-performance datastream replicator for Schematic" \
     org.opencontainers.image.vendor="Schematic" \
-    org.opencontainers.image.licenses="MIT" \
     org.opencontainers.image.version="${VERSION:-dev}" \
     org.opencontainers.image.revision="${REVISION:-unknown}" \
     org.opencontainers.image.created="${BUILDTIME:-unknown}" \
     org.opencontainers.image.source="https://github.com/SchematicHQ/schematic-datastream-replicator" \
+    org.opencontainers.image.documentation="https://docs.schematichq.com/production_readiness/replicator" \
     security.scan.enabled="true"
 
 # Run the application

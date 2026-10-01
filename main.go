@@ -472,7 +472,7 @@ func main() {
 
 	// Tracing is opt-in and stays off unless an OTLP endpoint is configured, so
 	// a self-hosted replicator that wants nothing to do with it pays nothing.
-	// See README.md, "OpenTelemetry tracing".
+	// See the Tracing section of docs.schematichq.com/production_readiness/replicator.
 	shutdownTracing, tracingErr := initTracing(context.Background(), logger)
 	if tracingErr != nil {
 		logger.Error(context.Background(), fmt.Sprintf("Failed to initialize tracing: %v", tracingErr))
