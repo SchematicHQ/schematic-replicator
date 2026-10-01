@@ -130,6 +130,10 @@ docker compose \
 docker compose --project-directory deployments up
 ```
 
+On Linux, `host.docker.internal` only resolves if the container is started with
+`--add-host=host.docker.internal:host-gateway` (or `extra_hosts` in Compose);
+otherwise use the host's IP address.
+
 Common local URLs:
 
 - `http://host.docker.internal:8080` (default)
@@ -159,14 +163,14 @@ docker compose -f deployments/docker-compose.yml logs -f redis
    mandatory; the app exits if it cannot connect. `REDIS_ADDR` takes bare
    `host:port`, not a `redis://` URL.
 3. **"Could not acquire writer lock"** — another replicator instance is running
-   against the same Redis. Only one writer is allowed; see the
-   [single-writer constraint](../README.md#single-writer-constraint).
+   against the same Redis. Only one writer is allowed; see
+   [one writer per Redis](https://docs.schematichq.com/production_readiness/replicator#one-writer-per-redis).
 4. **Build fails** — run `task clean` and retry.
 5. **Port conflicts** — check that 8090 (health) and 6380 (Redis) are free.
 
 ## Environment Variables
 
-See the [README](../README.md#environment-variables) for the full set. The ones
+See the [Replicator docs](https://docs.schematichq.com/production_readiness/replicator#configuration) for the full set. The ones
 that matter most in development:
 
 - `SCHEMATIC_API_KEY` — required

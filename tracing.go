@@ -46,8 +46,8 @@ func Tracer() trace.Tracer {
 // form) is set, so the default deployment exports nothing and pays nothing.
 // Everything is driven by the standard OTEL_* environment variables rather than
 // by flags of our own: this is a vendor-neutral OTLP exporter, and it will talk
-// to any collector that speaks the protocol. See README.md for the variables
-// that matter.
+// to any collector that speaks the protocol. The variables that matter are
+// listed in the Tracing section of docs.schematichq.com/production_readiness/replicator.
 //
 // The returned shutdown function is always safe to call.
 func initTracing(ctx context.Context, logger *SchematicLogger) (func(context.Context) error, error) {

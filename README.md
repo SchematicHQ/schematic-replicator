@@ -1,302 +1,38 @@
 # Schematic Datastream Replicator
 
-A high-performance, production-ready service that replicates Schematic data to Redis cache for ultra-fast lookups, serving as a caching proxy between applications and the Schematic API. 
+Replicates Schematic flag, company, and user data from the datastream into a
+customer-hosted Redis, so backend SDKs in replicator mode can evaluate flags
+without calling the Schematic API.
 
-## 🚀 Quick Start
+Customers run the published image, not this source:
 
-### Customer Installation (Docker)
+- Docker Hub: `getschematic/schematic-replicator`
+- Amazon ECR Public: `public.ecr.aws/n5h3a7j9/schematic-replicator`
 
-Pull and run the latest version from Docker Hub:
+Deployment, configuration, health checks, and the full environment variable
+reference live in the public docs:
+**https://docs.schematichq.com/production_readiness/replicator**. Update that page
+(in `schematic-fern-config`) when you add or change configuration here.
 
-```bash
-# Pull the latest image
-docker pull getschematic/schematic-replicator:latest
+## Development
 
-# Run with your Schematic API key and Redis connection
-docker run -d \
-  --name schematic-replicator \
-  -p 8090:8090 \
-  -e SCHEMATIC_API_KEY="your-api-key-here" \
-  -e REDIS_ADDR="your-redis-host:6379" \
-  getschematic/schematic-replicator:latest
-
-# Check health status
-curl http://localhost:8090/health
-```
-
-### Development Setup
-
-For detailed development setup, see [docs/DEV-README.md](docs/DEV-README.md).
-For Docker-specific instructions, see [docs/DOCKER.md](docs/DOCKER.md).
-
-## Environment Variables
-
-### Required
-- `SCHEMATIC_API_KEY`: Your Schematic API key
-
-### Additional Configuration
-- `SCHEMATIC_API_URL`: Schematic API base URL (default: `https://api.schematichq.com`)
-- `SCHEMATIC_DATASTREAM_URL`: WebSocket datastream endpoint (default: auto-derived from API URL)
-- `CACHE_TTL`: Cache time-to-live (default: unlimited, format: `1h30m`, `45s`, `0s` for unlimited, etc.)
-- `CACHE_CLEANUP_INTERVAL`: Cleanup stale cache entries interval (default: `1h`, format: `30m`, `2h`, `0s` to disable)
-- `LOG_LEVEL`: Logging level - `debug`, `info`, `warn`, `error` (default: `info`)
-- `HEALTH_PORT`: Health server port (default: `8090`)
-
-### WebSocket Keepalive Configuration
-Configure ping/pong intervals to handle load balancer timeouts:
-
-- `WS_PING_INTERVAL`: How often to send WebSocket pings (default: `30s`, format: `20s`, `45s`, etc.)
-- `WS_PONG_WAIT`: How long to wait for pong response before considering connection dead (default: `40s`)
-
-**Load Balancer Timeout Guidelines**:
-- Most cloud load balancers: Keep defaults (30s ping, 40s pong for 60s LB timeout)
-- Aggressive LB (30s timeout): Use `WS_PING_INTERVAL=15s WS_PONG_WAIT=25s`
-- Relaxed LB (120s+ timeout): Use `WS_PING_INTERVAL=50s WS_PONG_WAIT=60s`
-
-Example for aggressive load balancer:
-```bash
-export WS_PING_INTERVAL="15s"
-export WS_PONG_WAIT="25s"
-```
-
-### Async Processing Configuration (Performance Tuning)
-These settings allow you to optimize performance for your specific infrastructure and workload:
-
-- `NUM_WORKERS`: Number of worker goroutines per entity type (default: auto-detected = CPU cores, capped at 2-16 range)
-- `BATCH_SIZE`: Messages processed per batch for Redis operations (default: `5` - optimized for low latency)
-- `BATCH_TIMEOUT`: Maximum wait time before processing partial batches (default: `10ms` - prioritizes responsiveness)
-- `COMPANY_CHANNEL_SIZE`: Buffer size for company message queue (default: `200`)
-- `USER_CHANNEL_SIZE`: Buffer size for user message queue (default: `200`)
-- `FLAGS_CHANNEL_SIZE`: Buffer size for flags message queue (default: `50`)
-- `CIRCUIT_BREAKER_THRESHOLD`: Redis failures before circuit breaker opens (default: `3`)
-- `CIRCUIT_BREAKER_TIMEOUT`: Circuit breaker recovery timeout (default: `15s`)
-
-**Performance Guidelines**:
-- **Low Latency**: Use smaller batch sizes (1-5) and shorter timeouts (5-15ms)
-- **High Throughput**: Use larger batch sizes (10-50) and longer timeouts (25-100ms)
-- **Memory Constrained**: Reduce channel sizes (50-100 each)
-- **High CPU**: Increase worker count up to 2x CPU cores
-
-### Initial Loading Mode
-
-The replicator defaults to **asynchronous** initial loading. The async path loads
-companies/users once at startup (in the background, so the WebSocket connects
-quickly) and then resumes from the last processed message via **replay** on
-reconnect. The legacy **synchronous** path blocks on a full load at startup and
-does a **full reload on every reconnect**, and does not participate in replay.
-
-- `USE_ASYNC_LOADING`: initial loading mode (`true`/`false`, default: `true`).
-  Set to `false` to use the legacy synchronous path.
-- `ASYNC_LOADER_PAGE_SIZE`: Page size for initial data loading (default: `100`)
-- `ASYNC_LOADER_CIRCUIT_BREAKER_THRESHOLD`: API call failures before circuit breaker opens (default: `5`)
-- `ASYNC_LOADER_CIRCUIT_BREAKER_TIMEOUT`: Circuit breaker recovery timeout (default: `30s`)
-
-**When to use each mode**:
-- ✅ **Async (default)** — production, and any non-trivial dataset: fast connect,
-  background load, and replay-on-reconnect (avoids the bulk-reload storm when the
-  datastream connection drops). Replay only works on this path.
-- ⚠️ **Sync (`USE_ASYNC_LOADING=false`)** — small datasets / local development
-  where blocking load is simpler to reason about. Note it does a full reload on
-  every reconnect and has no replay.
-
-Async loader tuning (production with large datasets):
-```bash
-export ASYNC_LOADER_PAGE_SIZE="100"
-export ASYNC_LOADER_CIRCUIT_BREAKER_THRESHOLD="5"
-export ASYNC_LOADER_CIRCUIT_BREAKER_TIMEOUT="30s"
-# Opt into the legacy synchronous path instead (no replay):
-# export USE_ASYNC_LOADING="false"
-```
-
-### Redis Configuration (Required)
-
-**Note**: Redis is mandatory for the datastream replicator. The application will exit if it cannot connect to Redis.
-
-#### Single Redis Instance
-```bash
-export REDIS_ADDR="localhost:6379"           # Redis server address
-export REDIS_PASSWORD=""                     # Redis password (if required)
-export REDIS_DB="0"                          # Redis database number
-export REDIS_MAX_RETRIES="3"                # Maximum retry attempts
-export REDIS_DIAL_TIMEOUT="5s"              # Connection timeout
-export REDIS_READ_TIMEOUT="3s"              # Read timeout
-export REDIS_WRITE_TIMEOUT="3s"             # Write timeout
-```
-
-#### Redis Cluster
-```bash
-export REDIS_CLUSTER_ADDRS="localhost:7000,localhost:7001,localhost:7002"
-export REDIS_PASSWORD=""                     # Cluster password (if required)
-export REDIS_MAX_REDIRECTS="8"              # Maximum cluster redirects
-export REDIS_ROUTE_BY_LATENCY="true"        # Route by lowest latency
-```
-
-### Single-Writer Constraint
-
-Exactly **one** replicator instance may consume the datastream and write a given
-Redis. A second writer would corrupt the replay cursor and double-write the
-cache. This is enforced with a Redis lease: an instance acquires it at startup,
-heartbeats it while running, and releases it on shutdown. A crashed instance's
-lease expires by TTL so a replacement can take over.
-
-An instance that cannot acquire the lease **exits with an error**. Deploy
-accordingly: run a single replica, and on orchestrators use a replacement
-strategy that stops the old instance before starting the new one (Kubernetes
-`strategy: Recreate` — see [docs/DOCKER.md](docs/DOCKER.md#3-kubernetes)).
-
-- `WRITER_LOCK_DISABLED`: Skip lease acquisition (`true`/`false`, default: `false`).
-  Only for instances that never write the cache; setting this on a second writer
-  reintroduces the corruption it prevents.
-- `WRITER_LOCK_TTL`: Lease duration (default: `15s`). Renewed at TTL/3. Longer
-  values tolerate more heartbeat failures but delay takeover after a crash.
-- `WRITER_LOCK_ACQUIRE_TIMEOUT`: How long a starting instance waits for the
-  previous writer to release the lease before exiting (default: `5m`). The
-  health server is already serving `/health` while it waits and `/ready`
-  reports not-ready, so a rolling deploy can register the new instance on the
-  load balancer, drain and stop the old one, and hand the lease over without a
-  window with no instance at all.
-- `WRITER_LOCK_KEY`: Redis key holding the lease (default:
-  `schematic:datastream:writer_lock`). Change only to run independent replicators
-  against separate keyspaces in one Redis.
-
-### OpenTelemetry Tracing
-
-The replicator can export traces over OTLP to any collector or backend that
-speaks it (OpenTelemetry Collector, Datadog, Jaeger, Honeycomb, etc.). Tracing
-is **off by default**: nothing is exported and no spans are recorded until an
-endpoint is set. Configuration uses the standard
-[`OTEL_*` environment variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/):
-
-- `OTEL_EXPORTER_OTLP_ENDPOINT`: Collector base URL, e.g. `http://localhost:4318` (default: unset, tracing off)
-- `OTEL_EXPORTER_OTLP_PROTOCOL`: `http/protobuf` or `grpc` (default: `http/protobuf`)
-- `OTEL_EXPORTER_OTLP_HEADERS`: Comma-separated `key=value` pairs, for backends that authenticate with a header
-- `OTEL_SERVICE_NAME`: Service name on every span (default: `schematic-replicator`)
-- `OTEL_RESOURCE_ATTRIBUTES`: Comma-separated `key=value` pairs added to every span, e.g. `deployment.environment=prod`
-
-The replicator emits one trace per batch of replicated messages: a root span
-(`replicate company`, `replicate user`, or `replicate flags`) with a child span
-per Redis pipeline write or delete. Every span carries `replicator.entity` and
-`replicator.batch.size`; a batch dropped because the Redis circuit breaker is
-open is recorded as a failed span with `replicator.circuit_breaker.open`. All
-spans are sampled; set sampling in your collector.
-
-## Usage
-
-### Docker Development
-For local development with Docker:
+See [docs/DEV-README.md](docs/DEV-README.md) for local setup, the Task targets,
+and running against a local API.
 
 ```bash
-# Build Docker image for local development (includes git info)
-./scripts/build-docker-local.sh
-
-# Run with basic configuration
-docker run --rm \
-  -e SCHEMATIC_API_KEY="your-api-key-here" \
-  schematic-datastream-replicator:local
-
-# Run with Redis (assumes Redis running on host)
-docker run --rm \
-  -e SCHEMATIC_API_KEY="your-api-key-here" \
-  -e REDIS_ADDR="host.docker.internal:6379" \
-  schematic-datastream-replicator:local
+task build   # build the binary
+task test    # run the tests
+task quick   # build, test, and start the local stack with Redis
 ```
 
-You can also build manually without git info:
-```bash
-# Simple Docker build (uses default version labels)
-docker build -f deployments/Dockerfile -t schematic-datastream-replicator:local ../
-```
+## Releasing
 
-### With Redis Cache (unlimited cache)
-```bash
-export SCHEMATIC_API_KEY="your-api-key-here"
-export REDIS_ADDR="localhost:6379"
-# CACHE_TTL not set = unlimited cache (default)
-./schematic-datastream-replicator
-```
+Push a `vX.Y.Z` tag. The [release workflow](.github/workflows/release-docker-image.yml)
+builds a multi-arch image (`linux/amd64`, `linux/arm64`), pushes it to Docker Hub
+and ECR Public tagged `X.Y.Z`, `X.Y`, `X`, and `latest` with SBOM and provenance
+attestations, and scans both with Trivy.
 
-### With Redis Cache (custom TTL)
-```bash
-export SCHEMATIC_API_KEY="your-api-key-here"
-export REDIS_ADDR="localhost:6379"
-export CACHE_TTL="10m"
-./schematic-datastream-replicator
-```
-
-### Customer Deployment Examples
-
-#### Small Scale / Low Resource Environment
-```bash
-export SCHEMATIC_API_KEY="your-api-key-here"
-export REDIS_ADDR="localhost:6379"
-export NUM_WORKERS="2"                    # Minimal workers for small systems
-export BATCH_SIZE="3"                     # Small batches for low latency
-export BATCH_TIMEOUT="5ms"                # Very responsive
-export COMPANY_CHANNEL_SIZE="50"          # Small memory footprint
-export USER_CHANNEL_SIZE="50"
-export FLAGS_CHANNEL_SIZE="25"
-./schematic-datastream-replicator
-```
-
-#### High Traffic / Low Latency Environment
-```bash
-export SCHEMATIC_API_KEY="your-api-key-here"
-export REDIS_ADDR="localhost:6379"
-export NUM_WORKERS="8"                    # More workers for high concurrency
-export BATCH_SIZE="5"                     # Balanced for latency
-export BATCH_TIMEOUT="10ms"               # Default responsive setting
-export COMPANY_CHANNEL_SIZE="500"         # Larger buffers for traffic spikes
-export USER_CHANNEL_SIZE="500"
-export FLAGS_CHANNEL_SIZE="100"
-export CIRCUIT_BREAKER_THRESHOLD="5"      # More tolerance for transient failures
-./schematic-datastream-replicator
-```
-
-#### High Throughput / Resource Rich Environment
-```bash
-export SCHEMATIC_API_KEY="your-api-key-here"
-export REDIS_ADDR="localhost:6379"
-export NUM_WORKERS="12"                   # Maximum workers
-export BATCH_SIZE="20"                    # Larger batches for throughput
-export BATCH_TIMEOUT="50ms"               # Allow batching for efficiency
-export COMPANY_CHANNEL_SIZE="1000"        # Large buffers
-export USER_CHANNEL_SIZE="1000"
-export FLAGS_CHANNEL_SIZE="200"
-export CIRCUIT_BREAKER_TIMEOUT="30s"      # Longer recovery time
-./schematic-datastream-replicator
-```
-
-### With Debug Logging
-```bash
-export SCHEMATIC_API_KEY="your-api-key-here"
-export LOG_LEVEL="debug"
-./schematic-datastream-replicator
-```
-
-### Unlimited Cache with Cleanup (Recommended)
-```bash
-export SCHEMATIC_API_KEY="your-api-key"
-export REDIS_ADDR="localhost:6379"
-# CACHE_TTL not set = unlimited cache (default)
-export CACHE_CLEANUP_INTERVAL="1h"  # Clean up stale entries hourly (default)
-./schematic-datastream-replicator
-```
-
-## Building
-
-```bash
-go mod tidy
-go build -o schematic-datastream-replicator .
-```
-
-Or simply:
-```bash
-go build .  # Creates schematic-datastream-replicator binary
-```
-
-## Client Integration
-
-### Redis key layout
+## Redis key layout
 
 The replicator writes, and SDKs in replicator mode read, these keys (`<version>`
 is the rules engine cache version reported on `/health` as `cache_version`):
@@ -315,74 +51,3 @@ with any other prefix (or one that adds `schematic:` twice) never finds a key an
 silently falls back to the REST API. `testdata/redis_key_layout.json` is the
 contract: `TestRedisKeyLayoutMatchesFixture` checks the builders here, and each
 SDK carries a unit test against the same cases.
-
-### DataStream
-
-The Schematic Go client can be configured to work with the replicator service for ultra-fast feature flag evaluations.
-
-#### Replicator Mode
-
-When running an external schematic-datastream-replicator service, you can configure your Schematic client to use replicator mode. In this mode, the client connects to the replicator service instead of directly to Schematic's WebSocket API, and the replicator handles all data streaming and caching automatically.
-
-##### Example Usage
-
-```go
-package main
-
-import (
-    "context"
-    "log"
-    
-    schematic "github.com/SchematicHQ/schematic-go"
-    "github.com/SchematicHQ/schematic-go/core"
-)
-
-func main() {
-    client := schematic.NewClient(
-        core.WithAPIKey("your-api-key"),
-        core.WithDatastream(
-            core.WithReplicatorMode(),
-        ),
-    )
-    
-    // Client will now use replicator mode for all feature flag evaluations
-    ctx := context.Background()
-    flagValue, err := client.Features.CheckFlag(ctx, &core.CheckFlagRequestBody{
-        Flag: "my-flag",
-        Company: core.EntityInput{
-            Keys: map[string]string{"id": "company-123"},
-        },
-    })
-    
-    if err != nil {
-        log.Fatal(err)
-    }
-    
-    log.Printf("Flag value: %v", flagValue.Flag)
-}
-```
-
-##### Advanced Configuration (Optional)
-
-The client automatically configures sensible defaults for replicator mode, but you can customize the configuration if needed:
-
-```go
-client := schematic.NewClient(
-    core.WithAPIKey("your-api-key"),
-    core.WithDatastream(
-        core.WithReplicatorMode(),
-        core.WithReplicatorHealthURL("http://my-replicator:8090/ready"),
-        core.WithReplicatorHealthInterval(60*time.Second),
-    ),
-)
-```
-
-##### Default Configuration
-
-- **Replicator Health URL**: `http://localhost:8090/ready`
-- **Health Check Interval**: 30 seconds
-- **Cache TTL**: 24 hours (handled automatically by the replicator)
-
-## License
-
-This project follows the same license as the parent Schematic repository.
