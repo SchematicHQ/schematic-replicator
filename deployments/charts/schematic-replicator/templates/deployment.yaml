@@ -33,10 +33,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
-        {{- include "schematic-replicator.selectorLabels" . | nindent 8 }}
-        {{- with .Values.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- /* Selector labels win over podLabels: the pod template must keep
+               matching spec.selector and the Service selector. */}}
+        {{- $labels := merge (include "schematic-replicator.selectorLabels" . | fromYaml) (.Values.podLabels | default dict) }}
+        {{- toYaml $labels | nindent 8 }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

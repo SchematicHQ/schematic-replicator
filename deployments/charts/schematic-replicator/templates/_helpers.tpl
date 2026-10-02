@@ -31,8 +31,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{- define "schematic-replicator.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "schematic-replicator.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/name: {{ include "schematic-replicator.name" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end -}}
 
 {{- define "schematic-replicator.serviceAccountName" -}}

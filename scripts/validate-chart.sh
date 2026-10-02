@@ -96,6 +96,9 @@ assert_rejects "empty redis.addr" \
     --set schematic.apiKey=k --set redis.addr=""
 assert_rejects "existingSecret without key" \
     --set schematic.existingSecret=s --set schematic.existingSecretKey=""
+assert_rejects "redis existingSecret without key" \
+    --set schematic.apiKey=k --set redis.addr=r:6379 \
+    --set redis.existingSecret=s --set redis.existingSecretKey=""
 
 # The chart mirrors the application's environment surface. Nothing else couples
 # them, so a new os.Getenv in the code silently becomes unreachable via the
@@ -153,7 +156,10 @@ for name in sorted(extra):
     print(f"emitted by chart, not read by app: {name}")
 PYEOF
 )
-if [ -z "$ENV_DRIFT" ]; then
+ENV_DRIFT_STATUS=$?
+if [ "$ENV_DRIFT_STATUS" -ne 0 ]; then
+    fail "env drift check did not run (python3 exited $ENV_DRIFT_STATUS)"
+elif [ -z "$ENV_DRIFT" ]; then
     pass "env surface in sync"
 else
     while IFS= read -r line; do fail "$line"; done <<<"$ENV_DRIFT"

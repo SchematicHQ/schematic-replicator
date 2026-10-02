@@ -14,7 +14,7 @@ Check that it came up:
 
 Point Schematic SDK clients at:
 
-  http://{{ include "schematic-replicator.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/ready
+  http://{{ include "schematic-replicator.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/ready
 
 Two things worth knowing:
 
@@ -24,10 +24,12 @@ Two things worth knowing:
    update would deadlock. Expect a brief gap during upgrades: the old pod stops
    before the new one starts.
 
-2. Readiness reflects initial load progress on the async path. A large dataset
-   can take a while to become ready on first install. If it never does, check
-   the logs for "Could not acquire writer lock" - that means another instance
-   is already writing this Redis.
+2. The replicator reports ready once it is connected to the datastream and
+   subscribed to updates. Companies and users keep loading into Redis in the
+   background, so on a first install against an empty Redis some lookups miss
+   the cache until that load finishes. If it never becomes ready, check the
+   logs for "Could not acquire writer lock" - that means another instance is
+   already writing this Redis.
 {{- if .Values.writerLock.disabled }}
 
 WARNING: writerLock.disabled is true. This instance will not take the lease.
