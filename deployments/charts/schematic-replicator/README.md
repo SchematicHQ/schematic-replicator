@@ -13,12 +13,16 @@ cache instead of calling the API.
 
 ## Install
 
+The chart is published to Amazon ECR Public as an OCI artifact. No AWS account or
+login is needed to pull it. Pin `--version` to a chart release.
+
 ```bash
 # Recommended: keep the API key in a Secret you manage
 kubectl create secret generic schematic-api \
   --from-literal=api-key='your-api-key'
 
-helm install replicator ./deployments/charts/schematic-replicator \
+helm install replicator oci://public.ecr.aws/n5h3a7j9/charts/schematic-replicator \
+  --version 0.1.0 \
   --set schematic.existingSecret=schematic-api \
   --set redis.addr=my-redis:6379
 ```
@@ -27,10 +31,18 @@ Passing the key inline works too, but it is then stored in the Helm release and
 readable via `helm get values`:
 
 ```bash
-helm install replicator ./deployments/charts/schematic-replicator \
+helm install replicator oci://public.ecr.aws/n5h3a7j9/charts/schematic-replicator \
+  --version 0.1.0 \
   --set schematic.apiKey='your-api-key' \
   --set redis.addr=my-redis:6379
 ```
+
+The image defaults to Docker Hub (`getschematic/schematic-replicator`) at the
+chart's `appVersion`. To pull it from Amazon ECR Public instead, add
+`--set image.repository=public.ecr.aws/n5h3a7j9/schematic-replicator`.
+
+Full deployment and configuration documentation:
+https://docs.schematichq.com/production_readiness/replicator
 
 ## Configuration
 
@@ -68,6 +80,22 @@ one starts. That is inherent to the app's design, not a chart limitation.
 If you see `Could not acquire writer lock` in the logs, another instance is
 already writing that Redis.
 
+## Tracing
+
+Tracing is off by default. It is configured with the standard OpenTelemetry
+environment variables, which the chart passes through `extraEnv` rather than
+modelling as values:
+
+```yaml
+extraEnv:
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+  OTEL_SERVICE_NAME: "schematic-replicator"
+  OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=prod"
+```
+
+See the [documentation](https://docs.schematichq.com/production_readiness/replicator#tracing)
+for every supported variable.
+
 ## Connecting SDK clients
 
 Cache reads go to Redis directly, but the Schematic SDK in replicator mode polls
@@ -84,8 +112,10 @@ client := schematic.NewClient(
 )
 ```
 
-Readiness reflects initial load progress, so a large dataset can take a while to
-become ready on first install.
+The replicator reports ready once it is connected to the datastream and
+subscribed to updates. Companies and users continue loading into Redis in the
+background, so on a first install against an empty Redis, lookups for companies
+and users that have not loaded yet miss the cache until that load finishes.
 
 ## Development
 
@@ -95,6 +125,10 @@ helm template rep deployments/charts/schematic-replicator --set schematic.apiKey
 helm template rep deployments/charts/schematic-replicator --set schematic.apiKey=x \
   | kubeconform -strict -summary
 ```
+
+Release a chart version by bumping `version` in `Chart.yaml` and pushing a matching
+`chart-vX.Y.Z` tag; `.github/workflows/release-chart.yml` validates the chart and
+pushes it to `oci://public.ecr.aws/n5h3a7j9/charts/schematic-replicator`.
 
 The chart fails at template time — before anything reaches the cluster — when the
 API key is missing, `redis.addr` is a URL, cluster mode has no addresses, or an
