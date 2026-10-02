@@ -1008,25 +1008,8 @@ func convertMetricsToRulesEngine(apiMetrics []*schematicgo.CompanyEventPeriodMet
 				ValidUntil:    metric.ValidUntil,
 			}
 
-			switch metric.Period {
-			case "current_day":
-				companyMetric.Period = rulesengine.MetricPeriodCurrentDay
-			case "current_month":
-				companyMetric.Period = rulesengine.MetricPeriodCurrentMonth
-			case "all_time":
-				companyMetric.Period = rulesengine.MetricPeriodAllTime
-			default:
-				companyMetric.Period = rulesengine.MetricPeriodAllTime
-			}
-
-			switch metric.MonthReset {
-			case "first":
-				companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetFirst
-			case "billing_cycle":
-				companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetBilling
-			default:
-				companyMetric.MonthReset = rulesengine.MetricPeriodMonthResetFirst
-			}
+			companyMetric.Period = *convertToRulesEngineMetricPeriod(metric.Period)
+			companyMetric.MonthReset = *convertToRulesEngineMetricPeriodMonthReset(metric.MonthReset)
 
 			metrics = append(metrics, companyMetric)
 		}

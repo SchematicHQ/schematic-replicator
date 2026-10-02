@@ -721,3 +721,39 @@ func TestConvertCompanyPreservesFlagCriticalFields(t *testing.T) {
 	assert.Contains(t, c.PlanIDs, "plan_base")
 	assert.Contains(t, c.PlanIDs, "plan_addon")
 }
+
+// Metrics seeded from the REST API must keep their period and month reset.
+// A period the conversion doesn't recognize falls back to all_time, so a
+// missing case turns a weekly metric into a second all_time metric and
+// weekly limits evaluate against the wrong value.
+func TestConvertMetricsToRulesEngine_PeriodsAndMonthResets(t *testing.T) {
+	tests := []struct {
+		period     schematicgo.MetricPeriod
+		monthReset schematicgo.MetricPeriodMonthReset
+		wantPeriod rulesengine.MetricPeriod
+		wantReset  rulesengine.MetricPeriodMonthReset
+	}{
+		{"current_day", "first_of_month", rulesengine.MetricPeriodCurrentDay, rulesengine.MetricPeriodMonthResetFirst},
+		{"current_week", "first_of_month", rulesengine.MetricPeriodCurrentWeek, rulesengine.MetricPeriodMonthResetFirst},
+		{"current_month", "first_of_month", rulesengine.MetricPeriodCurrentMonth, rulesengine.MetricPeriodMonthResetFirst},
+		{"current_month", "billing_cycle", rulesengine.MetricPeriodCurrentMonth, rulesengine.MetricPeriodMonthResetBilling},
+		{"all_time", "first_of_month", rulesengine.MetricPeriodAllTime, rulesengine.MetricPeriodMonthResetFirst},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.period)+"/"+string(tt.monthReset), func(t *testing.T) {
+			metrics := convertMetricsToRulesEngine([]*schematicgo.CompanyEventPeriodMetricsResponseData{{
+				CompanyID:    "company-123",
+				EventSubtype: "api-request",
+				Period:       tt.period,
+				MonthReset:   tt.monthReset,
+				Value:        24,
+			}})
+
+			require.Len(t, metrics, 1)
+			assert.Equal(t, tt.wantPeriod, metrics[0].Period)
+			assert.Equal(t, tt.wantReset, metrics[0].MonthReset)
+			assert.Equal(t, int64(24), metrics[0].Value)
+		})
+	}
+}
