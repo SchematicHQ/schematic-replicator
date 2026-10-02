@@ -35,8 +35,8 @@ github.com/schematichq/rulesengine v0.1.25 h1:qtD7r8oV0r321OmZl9fvXPhopN52SEGqzK
 github.com/schematichq/rulesengine v0.1.25/go.mod h1:HmweBgjg+kVe6VuNMLc7FISHFF0wzr5cVGLAxlVP8+4=
 github.com/schematichq/schematic-datastream-ws v0.2.10 h1:mXyrG+xrHXmH0z0n1S49C/COC0Brs6rl+jdsE1NvuFk=
 github.com/schematichq/schematic-datastream-ws v0.2.10/go.mod h1:NKrg326C9YfCDOI84On5GZhvrovzDpFCzW8wdBwPZ3g=
-github.com/schematichq/schematic-go v1.6.4 h1:blFfgllySNzR9e7i1Dtk1X51zdoSWTUmQdl51V92P+s=
-github.com/schematichq/schematic-go v1.6.4/go.mod h1:Szzpz/0SgmEPTK2EcrqIsqnJg+DRklr8vORDQfz6T1A=
+github.com/schematichq/schematic-go v1.6.5 h1:d5VdTMnUA0musk240/ILwEYy1FCp3qFO7CmpwscWEhI=
+github.com/schematichq/schematic-go v1.6.5/go.mod h1:Szzpz/0SgmEPTK2EcrqIsqnJg+DRklr8vORDQfz6T1A=
 github.com/stretchr/objx v0.5.3 h1:jmXUvGomnU1o3W/V5h2VEradbpJDwGrzugQQvL0POH4=
 github.com/stretchr/objx v0.5.3/go.mod h1:rDQraq+vQZU7Fde9LOZLr8Tax6zZvy4kuNKF+QYS+U0=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
