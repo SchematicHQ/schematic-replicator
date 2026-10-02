@@ -134,7 +134,15 @@ emitted = set(re.findall(r'"name"\s+"([A-Z][A-Z0-9_]*)"', tpl))
 emitted |= set(re.findall(r'-\s+name:\s+([A-Z][A-Z0-9_]*)\b', tpl))
 
 # Vars deliberately left to extraEnv rather than modelled as a first-class value.
-allowed_missing: set[str] = set()
+# The OTEL_* exporter settings are standard OpenTelemetry variables; the SDK also
+# reads others (headers, service name, resource attributes) that never appear in
+# an os.Getenv here, so the chart leaves the whole family to extraEnv.
+allowed_missing: set[str] = {
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+}
 
 missing = code - emitted - allowed_missing
 extra = emitted - code

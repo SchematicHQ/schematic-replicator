@@ -14,6 +14,7 @@ config:
   cacheCleanupInterval: 2h
 writerLock:
   ttl: 20s
+  acquireTimeout: 2m
   key: custom:writer:lock
 replay:
   cursorKey: custom:replay:cursor

@@ -61,6 +61,10 @@ config:
 writerLock:
   disabled: false
   ttl: ""
+  # -- How long a starting instance waits for the previous writer to release the
+  # lease before exiting. With the chart's Recreate strategy the old pod releases
+  # it on shutdown, so this mainly matters after a crash, until the TTL expires.
+  acquireTimeout: ""
   key: ""
 
 # -- Datastream replay on reconnect.

@@ -118,6 +118,7 @@ nindent, which keeps every entry aligned regardless of how many are set.
 {{- include "schematic-replicator.env" (dict "name" "WRITER_LOCK_DISABLED" "value" "true") -}}
 {{- end -}}
 {{- include "schematic-replicator.env" (dict "name" "WRITER_LOCK_TTL" "value" $v.writerLock.ttl) -}}
+{{- include "schematic-replicator.env" (dict "name" "WRITER_LOCK_ACQUIRE_TIMEOUT" "value" $v.writerLock.acquireTimeout) -}}
 {{- include "schematic-replicator.env" (dict "name" "WRITER_LOCK_KEY" "value" $v.writerLock.key) -}}
 
 {{/* Replay. */}}
