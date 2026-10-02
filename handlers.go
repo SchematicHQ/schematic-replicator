@@ -1090,10 +1090,20 @@ func convertEntitlementsToRulesEngine(apiEntitlements []*schematicgo.FeatureEnti
 			SoftLimit:       apiEnt.SoftLimit,
 			EventName:       apiEnt.EventName,
 			MetricResetAt:   apiEnt.MetricResetAt,
+			EventSubtype:    apiEnt.EventSubtype,
 			CreditID:        apiEnt.CreditID,
+			ConsumptionRate: apiEnt.ConsumptionRate,
 			CreditTotal:     apiEnt.CreditTotal,
 			CreditUsed:      apiEnt.CreditUsed,
 			CreditRemaining: apiEnt.CreditRemaining,
+			CreditReserved:  apiEnt.CreditReserved,
+			CreditSettled:   apiEnt.CreditSettled,
+		}
+
+		for _, tier := range apiEnt.WarningTiers {
+			if tier != nil {
+				rulesEngineEnt.WarningTiers = append(rulesEngineEnt.WarningTiers, &rulesengine.WarningTier{Key: tier.Key, Value: tier.Value})
+			}
 		}
 
 		// Type conversions for numeric fields
